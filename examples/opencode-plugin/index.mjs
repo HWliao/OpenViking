@@ -38,7 +38,10 @@ export async function OpenVikingPlugin({ client, directory }) {
     event: async ({ event }) => {
       await sessionManager.handleEvent(event)
       if (event?.type === "session.created") {
-        await repoContext.refreshRepos({ force: true })
+        await repoContext.refreshRepos({
+          force: true,
+          requestConfig: sessionManager.getRequestConfig(getEventSessionId(event)),
+        })
       }
     },
 
@@ -66,3 +69,7 @@ export async function OpenVikingPlugin({ client, directory }) {
 }
 
 export default OpenVikingPlugin
+
+function getEventSessionId(event) {
+  return event?.properties?.info?.id ?? event?.properties?.sessionID ?? event?.properties?.sessionId
+}

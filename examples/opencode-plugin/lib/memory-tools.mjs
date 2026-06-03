@@ -5,14 +5,13 @@ import {
   makeRequest,
   unwrapResponse,
   validateVikingUri,
-  withAgentId,
 } from "./utils.mjs"
 
 const z = tool.schema
 
 export function createMemoryTools({ config, sessionManager, projectDirectory }) {
   function getRequestConfig(context) {
-    return withAgentId(config, sessionManager.getMappedAgentId(context?.sessionID))
+    return sessionManager.getRequestConfig(context?.sessionID)
   }
 
   return {

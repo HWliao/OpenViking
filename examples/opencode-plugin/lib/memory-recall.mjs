@@ -1,4 +1,4 @@
-import { log, makeRequest, unwrapResponse, withAgentId } from "./utils.mjs"
+import { log, makeRequest, unwrapResponse } from "./utils.mjs"
 
 const AUTO_RECALL_TIMEOUT_MS = 5000
 const RECALL_STOPWORDS = new Set([
@@ -16,8 +16,8 @@ export function createMemoryRecall({ config, sessionManager }) {
     const query = extractCurrentUserText(output.parts ?? [])
     if (!query) return
 
-    const agentId = sessionManager.getMappedAgentId(getInputSessionId(input, output))
-    const rawResults = await performRecallSearch(query, agentId)
+    const sessionId = getInputSessionId(input, output)
+    const rawResults = await performRecallSearch(query, sessionId)
     if (rawResults.length === 0) return
 
     const ranked = pickMemoriesForInjection(
@@ -41,9 +41,9 @@ export function createMemoryRecall({ config, sessionManager }) {
     }
   }
 
-  async function performRecallSearch(query, agentId) {
+  async function performRecallSearch(query, sessionId) {
     try {
-      const response = await makeRequest(withAgentId(config, agentId), {
+      const response = await makeRequest(sessionManager.getRequestConfig(sessionId), {
         method: "POST",
         endpoint: "/api/v1/search/find",
         body: { query: query.slice(0, 4000), limit: 20, mode: "auto" },

@@ -114,6 +114,10 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     return sessionMap.get(opencodeSessionId)?.agentId
   }
 
+  function getRequestConfig(opencodeSessionId) {
+    return withAgentId(config, getMappedAgentId(opencodeSessionId))
+  }
+
   async function handleEvent(event) {
     if (!event?.type || event.type === "session.diff") return
 
@@ -560,6 +564,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     handleEvent,
     getMappedSessionId,
     getMappedAgentId,
+    getRequestConfig,
     commitSession,
     flushAll,
   }

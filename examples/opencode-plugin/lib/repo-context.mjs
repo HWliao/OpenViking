@@ -4,7 +4,7 @@ export function createRepoContext({ config }) {
   let cachedRepos = null
   let lastFetchTime = 0
 
-  async function refreshRepos({ force = false } = {}) {
+  async function refreshRepos({ force = false, requestConfig = config } = {}) {
     if (!config.repoContext?.enabled) return null
 
     const now = Date.now()
@@ -14,7 +14,7 @@ export function createRepoContext({ config }) {
     }
 
     try {
-      const response = await makeRequest(config, {
+      const response = await makeRequest(requestConfig, {
         method: "GET",
         endpoint: `/api/v1/fs/ls?uri=${encodeURIComponent("viking://resources/")}&recursive=false&simple=false`,
         timeoutMs: 8000,
