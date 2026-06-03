@@ -8,6 +8,7 @@ export const DEFAULT_CONFIG = {
   account: "",
   user: "",
   agentId: "",
+  agentIdMode: "fixed",
   enabled: true,
   timeoutMs: 30000,
   runtime: {
@@ -35,7 +36,7 @@ function cloneDefaultConfig() {
 
 function mergeConfig(fileConfig = {}) {
   const config = cloneDefaultConfig()
-  for (const key of ["endpoint", "apiKey", "account", "user", "agentId", "enabled", "timeoutMs"]) {
+  for (const key of ["endpoint", "apiKey", "account", "user", "agentId", "agentIdMode", "enabled", "timeoutMs"]) {
     if (fileConfig[key] !== undefined) config[key] = fileConfig[key]
   }
   config.runtime = {
@@ -57,7 +58,11 @@ function mergeConfig(fileConfig = {}) {
   if (process.env.OPENVIKING_AGENT_ID) {
     config.agentId = process.env.OPENVIKING_AGENT_ID
   }
+  if (process.env.OPENVIKING_AGENT_ID_MODE) {
+    config.agentIdMode = process.env.OPENVIKING_AGENT_ID_MODE
+  }
 
+  config.agentIdMode = normalizeAgentIdMode(config.agentIdMode)
   config.timeoutMs = normalizeNumber(config.timeoutMs, DEFAULT_CONFIG.timeoutMs, 1000, 300000)
   config.repoContext.cacheTtlMs = normalizeNumber(
     config.repoContext.cacheTtlMs,
@@ -67,6 +72,10 @@ function mergeConfig(fileConfig = {}) {
   )
   clampRecallConfig(config.autoRecall)
   return config
+}
+
+function normalizeAgentIdMode(value) {
+  return value === "auto" || value === "fixed" ? value : DEFAULT_CONFIG.agentIdMode
 }
 
 function normalizeNumber(value, fallback, min, max) {
@@ -177,6 +186,11 @@ export function makeToast(client) {
 
 export function normalizeEndpoint(endpoint) {
   return endpoint.replace(/\/+$/, "")
+}
+
+export function withAgentId(config, agentId) {
+  if (!agentId) return config
+  return { ...config, agentId }
 }
 
 export async function makeRequest(config, options) {

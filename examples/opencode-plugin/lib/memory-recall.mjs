@@ -1,4 +1,4 @@
-import { log, makeRequest, unwrapResponse } from "./utils.mjs"
+import { log, makeRequest, unwrapResponse, withAgentId } from "./utils.mjs"
 
 const AUTO_RECALL_TIMEOUT_MS = 5000
 const RECALL_STOPWORDS = new Set([
@@ -10,13 +10,14 @@ const RECALL_TOKEN_RE = /[a-z0-9]{2,}/gi
 const PREFERENCE_QUERY_RE = /prefer|preference|favorite|favourite|like|偏好|喜欢|爱好|更倾向/i
 const TEMPORAL_QUERY_RE = /when|what time|date|day|month|year|yesterday|today|tomorrow|last|next|什么时候|何时|哪天|几月|几年|昨天|今天|明天|上周|下周|上个月|下个月|去年|明年/i
 
-export function createMemoryRecall({ config }) {
+export function createMemoryRecall({ config, sessionManager }) {
   async function injectRelevantMemories(input, output) {
     if (!config.autoRecall?.enabled) return
     const query = extractCurrentUserText(output.parts ?? [])
     if (!query) return
 
-    const rawResults = await performRecallSearch(query)
+    const agentId = sessionManager.getMappedAgentId(getInputSessionId(input, output))
+    const rawResults = await performRecallSearch(query, agentId)
     if (rawResults.length === 0) return
 
     const ranked = pickMemoriesForInjection(
@@ -40,9 +41,9 @@ export function createMemoryRecall({ config }) {
     }
   }
 
-  async function performRecallSearch(query) {
+  async function performRecallSearch(query, agentId) {
     try {
-      const response = await makeRequest(config, {
+      const response = await makeRequest(withAgentId(config, agentId), {
         method: "POST",
         endpoint: "/api/v1/search/find",
         body: { query: query.slice(0, 4000), limit: 20, mode: "auto" },
@@ -56,6 +57,10 @@ export function createMemoryRecall({ config }) {
   }
 
   return { injectRelevantMemories }
+}
+
+function getInputSessionId(input, output) {
+  return input.sessionID ?? output.message?.sessionID
 }
 
 function extractCurrentUserText(parts) {

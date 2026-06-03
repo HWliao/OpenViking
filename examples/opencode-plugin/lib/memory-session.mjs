@@ -5,6 +5,7 @@ import {
   makeRequest,
   safeStringify,
   unwrapResponse,
+  withAgentId,
 } from "./utils.mjs"
 
 const MAX_BUFFERED_MESSAGES_PER_SESSION = 100
@@ -75,6 +76,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   function serializeSessionMapping(mapping) {
     return {
       ovSessionId: mapping.ovSessionId,
+      agentId: mapping.agentId,
       createdAt: mapping.createdAt,
       capturedMessages: Array.from(mapping.capturedMessages),
       messageRoles: Array.from(mapping.messageRoles.entries()),
@@ -90,6 +92,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   function deserializeSessionMapping(persisted) {
     return {
       ovSessionId: persisted.ovSessionId,
+      agentId: persisted.agentId,
       createdAt: persisted.createdAt,
       capturedMessages: new Set(persisted.capturedMessages ?? []),
       messageRoles: new Map(persisted.messageRoles ?? []),
@@ -105,6 +108,10 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
   function getMappedSessionId(opencodeSessionId) {
     return sessionMap.get(opencodeSessionId)?.ovSessionId
+  }
+
+  function getMappedAgentId(opencodeSessionId) {
+    return sessionMap.get(opencodeSessionId)?.agentId
   }
 
   async function handleEvent(event) {
@@ -132,12 +139,14 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       return
     }
 
-    const ovSessionId = await ensureOpenVikingSession(sessionId)
+    const existing = sessionMap.get(sessionId)
+    const agentId = resolveSessionCreatedAgentId(event, existing)
+    const ovSessionId = await ensureOpenVikingSession(sessionId, agentId)
     if (!ovSessionId) return
 
-    const existing = sessionMap.get(sessionId)
-    const mapping = existing ?? createSessionMapping(ovSessionId)
+    const mapping = existing ?? createSessionMapping(ovSessionId, agentId)
     mapping.ovSessionId = ovSessionId
+    mapping.agentId = agentId
     sessionMap.set(sessionId, mapping)
 
     const bufferedMessages = sessionMessageBuffer.get(sessionId)
@@ -159,6 +168,8 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     log("INFO", "event", "Session mapping established", {
       opencode_session: sessionId,
       openviking_session: ovSessionId,
+      agent_id: agentId || config.agentId || "default",
+      agent_id_source: getAgentIdSource(agentId, event, existing),
     })
   }
 
@@ -259,11 +270,12 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     mapping.pendingMessages.set(messageId, mergeMessageContent(mapping.pendingMessages.get(messageId), part.text))
   }
 
-  async function ensureOpenVikingSession(opencodeSessionId) {
+  async function ensureOpenVikingSession(opencodeSessionId, agentId) {
     const knownSessionId = sessionMap.get(opencodeSessionId)?.ovSessionId
+    const requestConfig = withAgentId(config, agentId || sessionMap.get(opencodeSessionId)?.agentId)
     if (knownSessionId) {
       try {
-        const response = await makeRequest(config, {
+        const response = await makeRequest(requestConfig, {
           method: "GET",
           endpoint: `/api/v1/sessions/${encodeURIComponent(knownSessionId)}`,
           timeoutMs: 5000,
@@ -279,7 +291,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     }
 
     try {
-      const response = await makeRequest(config, {
+      const response = await makeRequest(requestConfig, {
         method: "POST",
         endpoint: "/api/v1/sessions",
         body: {},
@@ -308,7 +320,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
       mapping.sendingMessages.add(messageId)
       try {
-        const success = await addMessageToSession(mapping.ovSessionId, role, content)
+        const success = await addMessageToSession(mapping, role, content)
         if (success) {
           const latest = mapping.pendingMessages.get(messageId)
           if (latest && latest !== content) {
@@ -324,11 +336,11 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     }
   }
 
-  async function addMessageToSession(ovSessionId, role, content) {
+  async function addMessageToSession(mapping, role, content) {
     try {
-      const response = await makeRequest(config, {
+      const response = await makeRequest(getMappingConfig(mapping), {
         method: "POST",
-        endpoint: `/api/v1/sessions/${encodeURIComponent(ovSessionId)}/messages`,
+        endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/messages`,
         body: { role, content },
         timeoutMs: 5000,
       })
@@ -336,7 +348,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       return true
     } catch (error) {
       log("ERROR", "message", "Failed to add message to OpenViking session", {
-        openviking_session: ovSessionId,
+        openviking_session: mapping.ovSessionId,
         role,
         error: error?.message,
       })
@@ -351,7 +363,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     }
 
     try {
-      const response = await makeRequest(config, {
+      const response = await makeRequest(getMappingConfig(mapping), {
         method: "POST",
         endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/commit`,
         timeoutMs: 10000,
@@ -373,7 +385,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       return { mode: "background", taskId }
     } catch (error) {
       if (error?.message?.includes("already has a commit in progress")) {
-        const taskId = await findRunningCommitTaskId(mapping.ovSessionId)
+        const taskId = await findRunningCommitTaskId(mapping)
         if (taskId) {
           mapping.commitInFlight = true
           mapping.commitTaskId = taskId
@@ -398,7 +410,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       if (abortSignal?.aborted) throw new Error("Operation aborted")
       if (!mapping.commitInFlight) return null
       if (!mapping.commitTaskId) {
-        mapping.commitTaskId = await findRunningCommitTaskId(mapping.ovSessionId)
+        mapping.commitTaskId = await findRunningCommitTaskId(mapping)
         if (!mapping.commitTaskId) {
           clearCommitState(mapping)
           debouncedSaveSessionMap()
@@ -406,7 +418,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         }
       }
 
-      const task = await getTask(mapping.commitTaskId, abortSignal)
+      const task = await getTask(mapping, abortSignal)
       if (task.status === "completed") {
         await finalizeCommitSuccess(mapping, opencodeSessionId)
         return task
@@ -421,21 +433,21 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     return null
   }
 
-  async function getTask(taskId, abortSignal) {
-    const response = await makeRequest(config, {
+  async function getTask(mapping, abortSignal) {
+    const response = await makeRequest(getMappingConfig(mapping), {
       method: "GET",
-      endpoint: `/api/v1/tasks/${encodeURIComponent(taskId)}`,
+      endpoint: `/api/v1/tasks/${encodeURIComponent(mapping.commitTaskId)}`,
       timeoutMs: 5000,
       abortSignal,
     })
     return unwrapResponse(response)
   }
 
-  async function findRunningCommitTaskId(ovSessionId) {
+  async function findRunningCommitTaskId(mapping) {
     try {
-      const response = await makeRequest(config, {
+      const response = await makeRequest(getMappingConfig(mapping), {
         method: "GET",
-        endpoint: `/api/v1/tasks?task_type=session_commit&resource_id=${encodeURIComponent(ovSessionId)}&limit=10`,
+        endpoint: `/api/v1/tasks?task_type=session_commit&resource_id=${encodeURIComponent(mapping.ovSessionId)}&limit=10`,
         timeoutMs: 5000,
       })
       const tasks = unwrapResponse(response) ?? []
@@ -515,9 +527,10 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   async function commitSession(sessionId, opencodeSessionId, abortSignal) {
-    let mapping = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
+    const mapped = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
+    let mapping = mapped
     if (!mapping || mapping.ovSessionId !== sessionId) {
-      mapping = createSessionMapping(sessionId)
+      mapping = createSessionMapping(sessionId, mapped?.agentId)
     } else {
       await flushPendingMessages(opencodeSessionId, mapping)
     }
@@ -540,13 +553,15 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     init,
     handleEvent,
     getMappedSessionId,
+    getMappedAgentId,
     commitSession,
     flushAll,
   }
 
-  function createSessionMapping(ovSessionId) {
+  function createSessionMapping(ovSessionId, agentId) {
     return {
       ovSessionId,
+      agentId,
       createdAt: Date.now(),
       capturedMessages: new Set(),
       messageRoles: new Map(),
@@ -559,6 +574,31 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
   function resolveEventSessionId(event) {
     return event?.properties?.info?.id ?? event?.properties?.sessionID ?? event?.properties?.sessionId
+  }
+
+  function resolveSessionCreatedAgentId(event, existingMapping) {
+    if (config.agentIdMode !== "auto") return undefined
+    return safeAgentIdFromCwd(event?.properties?.info?.cwd) || existingMapping?.agentId || config.agentId || undefined
+  }
+
+  function safeAgentIdFromCwd(cwd) {
+    if (typeof cwd !== "string") return ""
+    return path.normalize(cwd.trim())
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+  }
+
+  function getAgentIdSource(agentId, event, existingMapping) {
+    if (!agentId) return config.agentId ? "config" : "server-default"
+    if (safeAgentIdFromCwd(event?.properties?.info?.cwd) === agentId) return "cwd"
+    if (existingMapping?.agentId === agentId) return "session-map"
+    if (config.agentId === agentId) return "config"
+    return "unknown"
+  }
+
+  function getMappingConfig(mapping) {
+    return withAgentId(config, mapping?.agentId)
   }
 
   function mergeMessageContent(existing, incoming) {

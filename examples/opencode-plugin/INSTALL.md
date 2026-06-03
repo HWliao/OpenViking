@@ -98,6 +98,7 @@ Example configuration:
   "account": "",
   "user": "",
   "agentId": "",
+  "agentIdMode": "fixed",
   "enabled": true,
   "timeoutMs": 30000,
   "repoContext": { "enabled": true, "cacheTtlMs": 60000 },
@@ -120,7 +121,9 @@ export OPENVIKING_API_KEY="your-api-key-here"
 
 `apiKey` is sent as `X-API-Key`. `account`, `user`, and `agentId` are sent as `X-OpenViking-Account`, `X-OpenViking-User`, and `X-OpenViking-Agent`, respectively. If multi-tenant authentication is enabled on the OpenViking server, tenant-scoped APIs usually require `account` and `user` to be configured.
 
-`OPENVIKING_API_KEY`, `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`, and `OPENVIKING_AGENT_ID` take precedence over the corresponding values in `openviking-config.json`.
+`agentIdMode` defaults to `fixed`, preserving the existing behavior. Set it to `auto` to derive a session-scoped agent id from the `session.created` event's `info.cwd`; unsupported characters are replaced with `_`. If cwd derivation fails, the plugin falls back to `agentId`, then to the server default.
+
+`OPENVIKING_API_KEY`, `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`, and `OPENVIKING_AGENT_ID` take precedence over the corresponding values in `openviking-config.json`. `OPENVIKING_AGENT_ID_MODE` can override `agentIdMode`.
 
 For advanced setups, use `OPENVIKING_PLUGIN_CONFIG` to point to another configuration file path.
 

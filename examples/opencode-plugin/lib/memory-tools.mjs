@@ -5,11 +5,16 @@ import {
   makeRequest,
   unwrapResponse,
   validateVikingUri,
+  withAgentId,
 } from "./utils.mjs"
 
 const z = tool.schema
 
 export function createMemoryTools({ config, sessionManager, projectDirectory }) {
+  function getRequestConfig(context) {
+    return withAgentId(config, sessionManager.getMappedAgentId(context?.sessionID))
+  }
+
   return {
     memsearch: tool({
       description:
@@ -38,7 +43,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           if (args.score_threshold !== undefined) body.score_threshold = args.score_threshold
           if (mode === "deep" && sessionId) body.session_id = sessionId
 
-          const response = await makeRequest(config, {
+          const response = await makeRequest(getRequestConfig(context), {
             method: "POST",
             endpoint: mode === "deep" ? "/api/v1/search/search" : "/api/v1/search/find",
             body,
@@ -66,9 +71,9 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         try {
           let level = args.level ?? "auto"
           if (level === "auto") {
-            level = await resolveReadLevel(config, args.uri, context.abort)
+            level = await resolveReadLevel(getRequestConfig(context), args.uri, context.abort)
           }
-          const response = await makeRequest(config, {
+          const response = await makeRequest(getRequestConfig(context), {
             method: "GET",
             endpoint: `/api/v1/content/${level}?uri=${encodeURIComponent(args.uri)}`,
             abortSignal: context.abort,
@@ -106,7 +111,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           } else {
             endpoint = `/api/v1/fs/ls?uri=${encodedUri}&recursive=${args.recursive ? "true" : "false"}&simple=${args.simple ? "true" : "false"}`
           }
-          const response = await makeRequest(config, { method: "GET", endpoint, abortSignal: context.abort })
+          const response = await makeRequest(getRequestConfig(context), { method: "GET", endpoint, abortSignal: context.abort })
           return JSON.stringify({ view, result: unwrapResponse(response) }, null, 2)
         } catch (error) {
           log("ERROR", "membrowse", "Browse failed", { error: error?.message, uri: args.uri })
@@ -158,7 +163,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           if (args.case_insensitive !== undefined) body.case_insensitive = args.case_insensitive
           if (args.exclude_uri) body.exclude_uri = args.exclude_uri
           if (args.level_limit !== undefined) body.level_limit = args.level_limit
-          const response = await makeRequest(config, {
+          const response = await makeRequest(getRequestConfig(context), {
             method: "POST",
             endpoint: "/api/v1/search/grep",
             body,
@@ -188,7 +193,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         try {
           const body = { uri, pattern: args.pattern }
           if (args.node_limit !== undefined) body.node_limit = args.node_limit
-          const response = await makeRequest(config, {
+          const response = await makeRequest(getRequestConfig(context), {
             method: "POST",
             endpoint: "/api/v1/search/glob",
             body,
@@ -221,9 +226,10 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         if (args.parent && !args.parent.startsWith("viking://resources")) return "Error: `parent` must be under viking://resources/."
 
         try {
-          const result = await addMemaddResource(config, args, projectDirectory, context.abort)
+          const requestConfig = getRequestConfig(context)
+          const result = await addMemaddResource(requestConfig, args, projectDirectory, context.abort)
           if (result.error) return result.error
-          const queue = await getQueueStatus(config, context.abort)
+          const queue = await getQueueStatus(requestConfig, context.abort)
           return JSON.stringify({ add_resource: unwrapResponse(result.addResponse), queue }, null, 2)
         } catch (error) {
           log("ERROR", "memadd", "Add resource failed", { error: error?.message, args })
@@ -248,7 +254,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         if (validationError) return validationError
 
         try {
-          const response = await makeRequest(config, {
+          const response = await makeRequest(getRequestConfig(context), {
             method: "DELETE",
             endpoint: `/api/v1/fs?uri=${encodeURIComponent(args.uri)}&recursive=${args.recursive ? "true" : "false"}`,
             abortSignal: context.abort,
@@ -266,7 +272,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
       args: {},
       async execute(_args, context) {
         try {
-          const queue = await getQueueStatus(config, context.abort)
+          const queue = await getQueueStatus(getRequestConfig(context), context.abort)
           return JSON.stringify(queue, null, 2)
         } catch (error) {
           log("ERROR", "memqueue", "Queue status failed", { error: error?.message })

@@ -111,6 +111,7 @@ Create `~/.config/opencode/openviking-config.json`:
   "account": "",
   "user": "",
   "agentId": "",
+  "agentIdMode": "fixed",
   "enabled": true,
   "timeoutMs": 30000,
   "repoContext": { "enabled": true, "cacheTtlMs": 60000 },
@@ -129,8 +130,15 @@ Create `~/.config/opencode/openviking-config.json`:
 `X-OpenViking-Account`, `X-OpenViking-User`, and `X-OpenViking-Agent`.
 They are required by multi-tenant OpenViking servers for tenant-scoped APIs.
 
+`agentIdMode` defaults to `fixed`, which preserves the existing behavior and uses
+the configured `agentId` directly. Set it to `auto` to derive a session-scoped
+agent id from the `session.created` event's `info.cwd`; unsupported characters
+are replaced with `_`. If cwd derivation fails, the plugin falls back to
+`agentId`, then to the server default.
+
 `OPENVIKING_API_KEY`, `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`, and
 `OPENVIKING_AGENT_ID` take precedence over values in this file.
+`OPENVIKING_AGENT_ID_MODE` can override `agentIdMode`.
 
 For advanced setups, `OPENVIKING_PLUGIN_CONFIG` can point to another config file path.
 
