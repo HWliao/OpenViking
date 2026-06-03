@@ -124,8 +124,8 @@ export OPENVIKING_API_KEY="your-api-key-here"
 如果 OpenViking 服务启用了多租户认证，租户级 API 通常必须配置 `account` 和 `user`。
 
 `agentIdMode` 默认是 `fixed`，保持现有行为，直接使用配置里的 `agentId`。
-设为 `auto` 后，插件会在 `session.created` 时从 `info.cwd` 派生当前 session 的 agent id；
-不安全字符会替换为 `_`。如果 cwd 派生失败，会回退到 `agentId`，再回退到服务端默认值。
+设为 `auto` 后，插件会在 `session.created` 时从 `info.cwd` 或 `info.directory` 派生当前 session 的 agent id；
+不安全字符会替换为 `_`。如果目录派生失败，会回退到 `agentId`，再回退到服务端默认值。
 
 `OPENVIKING_API_KEY`、`OPENVIKING_ACCOUNT`、`OPENVIKING_USER`、`OPENVIKING_AGENT_ID`
 优先级高于 `openviking-config.json` 里的同名配置。

@@ -132,9 +132,9 @@ They are required by multi-tenant OpenViking servers for tenant-scoped APIs.
 
 `agentIdMode` defaults to `fixed`, which preserves the existing behavior and uses
 the configured `agentId` directly. Set it to `auto` to derive a session-scoped
-agent id from the `session.created` event's `info.cwd`; unsupported characters
-are replaced with `_`. If cwd derivation fails, the plugin falls back to
-`agentId`, then to the server default.
+agent id from the `session.created` event's `info.cwd` or `info.directory`;
+unsupported characters are replaced with `_`. If directory derivation fails,
+the plugin falls back to `agentId`, then to the server default.
 
 `OPENVIKING_API_KEY`, `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`, and
 `OPENVIKING_AGENT_ID` take precedence over values in this file.

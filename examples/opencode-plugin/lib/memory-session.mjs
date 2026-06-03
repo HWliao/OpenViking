@@ -141,6 +141,12 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
     const existing = sessionMap.get(sessionId)
     const agentId = resolveSessionCreatedAgentId(event, existing)
+    if (config.agentIdMode === "auto" && !agentId) {
+      log("DEBUG", "event", "session.created event info", {
+        properties: event?.properties,
+        info: event?.properties?.info,
+      })
+    }
     const ovSessionId = await ensureOpenVikingSession(sessionId, agentId)
     if (!ovSessionId) return
 
@@ -578,7 +584,8 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
   function resolveSessionCreatedAgentId(event, existingMapping) {
     if (config.agentIdMode !== "auto") return undefined
-    return safeAgentIdFromCwd(event?.properties?.info?.cwd) || existingMapping?.agentId || config.agentId || undefined
+    const info = event?.properties?.info
+    return safeAgentIdFromCwd(info?.cwd) || safeAgentIdFromCwd(info?.directory) || existingMapping?.agentId || config.agentId || undefined
   }
 
   function safeAgentIdFromCwd(cwd) {
@@ -590,8 +597,10 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   function getAgentIdSource(agentId, event, existingMapping) {
+    const info = event?.properties?.info
     if (!agentId) return config.agentId ? "config" : "server-default"
-    if (safeAgentIdFromCwd(event?.properties?.info?.cwd) === agentId) return "cwd"
+    if (safeAgentIdFromCwd(info?.cwd) === agentId) return "cwd"
+    if (safeAgentIdFromCwd(info?.directory) === agentId) return "directory"
     if (existingMapping?.agentId === agentId) return "session-map"
     if (config.agentId === agentId) return "config"
     return "unknown"
