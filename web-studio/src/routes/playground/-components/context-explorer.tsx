@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  BotIcon,
   ChevronRightIcon,
+  ClipboardListIcon,
   CommandIcon,
   FileTextIcon,
   FolderIcon,
@@ -11,6 +11,7 @@ import {
   Loader2Icon,
   PlusIcon,
   RefreshCcwIcon,
+  SearchIcon,
 } from 'lucide-react'
 
 import { Button } from '#/components/ui/button'
@@ -30,15 +31,29 @@ const TREE_GUIDE_OFFSET = 8
 const TREE_CHILD_CONTENT_OFFSET = 26
 
 export function ContextExplorerHeader({
+  activeTaskCount,
+  hasActiveTasks,
+  hasTasks,
   isRefreshing,
+  isRefreshingTasks,
   onAddResource,
+  onOpenProcessingTasks,
+  onOpenSearch,
   onRefresh,
 }: {
+  activeTaskCount: number
+  hasActiveTasks: boolean
+  hasTasks: boolean
   isRefreshing: boolean
+  isRefreshingTasks: boolean
   onAddResource: () => void
+  onOpenProcessingTasks: () => void
+  onOpenSearch: () => void
   onRefresh: () => void
 }) {
-  const { t } = useTranslation('playground')
+  const { t } = useTranslation(['playground', 'resources'])
+  const showProcessingTasks = hasTasks || isRefreshingTasks
+
   return (
     <div className="border-b px-3 py-3">
       <div className="flex items-center gap-2">
@@ -48,6 +63,37 @@ export function ContextExplorerHeader({
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold">{t('explorer.title')}</div>
         </div>
+        {showProcessingTasks ? (
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            className="relative"
+            title={t('processingTasks.title', { ns: 'resources' })}
+            onClick={onOpenProcessingTasks}
+          >
+            <ClipboardListIcon
+              className={cn(
+                'size-4',
+                (hasActiveTasks || isRefreshingTasks) && 'text-primary',
+              )}
+            />
+            {activeTaskCount > 0 ? (
+              <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground">
+                {activeTaskCount}
+              </span>
+            ) : null}
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="ghost"
+          title={t('explorer.search')}
+          onClick={onOpenSearch}
+        >
+          <SearchIcon className="size-4" />
+        </Button>
         <Button
           type="button"
           size="icon-sm"
@@ -74,7 +120,7 @@ export function ContextExplorerHeader({
 }
 
 const NAMESPACES: Array<{
-  descriptionKey: 'agent' | 'resources' | 'session' | 'user'
+  descriptionKey: 'resources' | 'session' | 'user'
   icon: typeof FolderIcon
   label: string
   uri: string
@@ -90,12 +136,6 @@ const NAMESPACES: Array<{
     icon: CommandIcon,
     label: 'Session',
     uri: 'viking://session/',
-  },
-  {
-    descriptionKey: 'agent',
-    icon: BotIcon,
-    label: 'Agent',
-    uri: 'viking://agent/',
   },
   {
     descriptionKey: 'resources',
@@ -189,6 +229,7 @@ export function ContextTreeNode({
   onSelectFile: (entry: VikingFsEntry) => void
   selectedFileUri?: string | null
 }) {
+  const { t } = useTranslation('playground')
   const isOpen = expandedKeys.has(entry.uri)
   const isFileSelected = !entry.isDir && selectedFileUri === entry.uri
   const isDirSelected =
@@ -233,11 +274,13 @@ export function ContextTreeNode({
   const select = useCallback(() => {
     if (entry.isDir) {
       onSelectDirectory(entry)
-      toggle()
+      if (!isOpen || isSelected) {
+        toggle()
+      }
     } else {
       onSelectFile(entry)
     }
-  }, [entry, onSelectDirectory, onSelectFile, toggle])
+  }, [entry, isOpen, isSelected, onSelectDirectory, onSelectFile, toggle])
 
   return (
     <div className="relative min-w-0">
@@ -297,11 +340,11 @@ export function ContextTreeNode({
         ) : null}
         {entry.name === '_abstract.md' ? (
           <span className="shrink-0 rounded bg-muted px-1 font-sans text-[10px] text-muted-foreground">
-            L0
+            {t('explorer.abstractLevel')}
           </span>
         ) : entry.name === '_overview.md' ? (
           <span className="shrink-0 rounded bg-muted px-1 font-sans text-[10px] text-muted-foreground">
-            L1
+            {t('explorer.overviewLevel')}
           </span>
         ) : null}
       </div>
@@ -315,7 +358,7 @@ export function ContextTreeNode({
             >
               <TreeIndentGuides level={level + 1} />
               <Loader2Icon className="size-3 animate-spin" />
-              loading
+              {t('explorer.loading')}
             </div>
           ) : children.length > 0 ? (
             children.map((child) => (
@@ -337,7 +380,7 @@ export function ContextTreeNode({
               style={{ paddingLeft: treeChildContentPadding(level) }}
             >
               <TreeIndentGuides level={level + 1} />
-              empty
+              {t('explorer.empty')}
             </div>
           )}
         </div>

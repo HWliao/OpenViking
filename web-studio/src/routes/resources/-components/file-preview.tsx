@@ -11,6 +11,7 @@ import { Button } from '#/components/ui/button'
 import { ScrollArea } from '#/components/ui/scroll-area'
 import { client } from '#/gen/ov-client/client.gen'
 import { getContentDownload, ovClient } from '#/lib/ov-client'
+import { fileNameFromUri } from '#/lib/viking-uri'
 import type { GetContentDownloadData } from '#/gen/ov-client/types.gen'
 import type { ContentDownloadQuery } from '@ov-server/api/v1/content'
 
@@ -101,6 +102,7 @@ async function ensureLanguage(lang: string): Promise<void> {
 
 interface FilePreviewProps {
   file: VikingFsEntry | null
+  hideDirectoryHeader?: boolean
   onClose: () => void
   showCloseButton?: boolean
 }
@@ -133,6 +135,8 @@ const DIRECTORY_LEVEL_META: Array<{
 
 const JSONL_MESSAGE_PREVIEW_LIMIT = 720
 const JSONL_TOOLCALL_STORAGE_KEY = 'openviking.playground.jsonlToolCall'
+const COLLAPSE_SYMBOL = '▾'
+const EXPAND_SYMBOL = '▸'
 
 type JsonlRecord = {
   error: Error | null
@@ -273,22 +277,132 @@ function resolveRelativeVikingUri(
   return `${resolved}${suffix}`
 }
 
-function resolveMarkdownAssetUrl(assetPath: string, fileUri: string): string {
+type MarkdownAssetTarget =
+  | { kind: 'external'; value: string }
+  | { kind: 'raw'; value: string }
+  | { kind: 'viking'; value: string }
+
+function safeDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function resolveMarkdownAssetTarget(
+  assetPath: string,
+  fileUri: string,
+): MarkdownAssetTarget {
   const trimmed = assetPath.trim()
   if (!trimmed || trimmed.startsWith('#')) {
-    return trimmed
+    return { kind: 'raw', value: trimmed }
   }
 
   if (/^(https?:|data:|blob:|mailto:|tel:)/i.test(trimmed)) {
-    return trimmed
+    return { kind: 'external', value: trimmed }
   }
 
-  if (trimmed.startsWith(vikingPrefix)) {
-    return toDownloadUrl(trimmed)
+  // react-markdown percent-encodes the URL it passes via `src`/`href`
+  // (e.g. Chinese characters become %E4%BA%92). Decode it back to the literal
+  // form so the API client's query serializer encodes it exactly once and we
+  // avoid a double-encoded URI that the backend rejects with HTTP 400.
+  const decoded = safeDecodeUri(trimmed)
+
+  const vikingUri = decoded.startsWith(vikingPrefix)
+    ? decoded
+    : resolveRelativeVikingUri(fileUri, decoded)
+  return { kind: 'viking', value: vikingUri }
+}
+
+function resolveMarkdownAssetUrl(assetPath: string, fileUri: string): string {
+  const target = resolveMarkdownAssetTarget(assetPath, fileUri)
+  if (target.kind === 'viking') {
+    return toDownloadUrl(target.value)
+  }
+  return target.value
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  fileUri,
+}: {
+  src?: string
+  alt?: string
+  fileUri: string
+}) {
+  const target = useMemo(
+    () => (src ? resolveMarkdownAssetTarget(String(src), fileUri) : null),
+    [src, fileUri],
+  )
+  const [objectUrl, setObjectUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!target || target.kind !== 'viking') {
+      return
+    }
+
+    let alive = true
+    let created: string | null = null
+    setObjectUrl(null)
+    setFailed(false)
+
+    const run = async () => {
+      try {
+        const response = await getContentDownload({
+          query: { uri: target.value },
+          responseType: 'blob',
+          throwOnError: true,
+        })
+        if (!alive) return
+        const blob = response.data as Blob
+        if (blob.size === 0) {
+          throw new Error('empty blob')
+        }
+        created = URL.createObjectURL(blob)
+        setObjectUrl(created)
+      } catch {
+        if (alive) setFailed(true)
+      }
+    }
+
+    void run()
+    return () => {
+      alive = false
+      if (created) {
+        URL.revokeObjectURL(created)
+      }
+    }
+  }, [target])
+
+  const resolvedSrc =
+    target?.kind === 'viking'
+      ? objectUrl || ''
+      : target
+        ? target.value
+        : String(src || '')
+
+  if (target?.kind === 'viking' && !resolvedSrc) {
+    if (failed) {
+      return (
+        <span className="text-xs text-muted-foreground">
+          [{alt || fileNameFromUri(target.value)}]
+        </span>
+      )
+    }
+    return null
   }
 
-  const vikingUri = resolveRelativeVikingUri(fileUri, trimmed)
-  return toDownloadUrl(vikingUri)
+  return (
+    <img
+      src={resolvedSrc}
+      alt={alt || ''}
+      loading="lazy"
+      className="max-w-full rounded-md outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+    />
+  )
 }
 
 function detectCodeLanguage(filename: string): string | null {
@@ -619,7 +733,7 @@ function getJsonlMessage(record: JsonlRecord): JsonlMessage {
     kind,
     label: toolResult ? 'tool-result' : role,
     lineNo: index + 1,
-    roleId: String(parsed.role_id ?? source.role_id ?? ''),
+    roleId: String(parsed.peer_id ?? source.peer_id ?? ''),
     text,
     time: String(
       parsed.timestamp ?? parsed.created_at ?? source.created_at ?? '',
@@ -664,7 +778,7 @@ function JsonlRawRow({ record }: { record: JsonlRecord }) {
         onClick={() => setOpen((current) => !current)}
       >
         <span>{record.index + 1}</span>
-        <span>{open ? '▾' : '▸'}</span>
+        <span aria-hidden="true">{open ? COLLAPSE_SYMBOL : EXPAND_SYMBOL}</span>
       </button>
       <div className="min-w-0 px-3 py-2">
         {open ? (
@@ -701,6 +815,7 @@ function JsonlRawRow({ record }: { record: JsonlRecord }) {
 }
 
 function JsonlToolBody({ text, toolName }: { text: string; toolName: string }) {
+  const { t } = useTranslation('resources')
   const afterTag = text.replace(/^\[tool:\s*[^\]]+\]\s*/, '')
   const parsed = useMemo(() => {
     if (!toolName || !afterTag.trim()) return null
@@ -717,22 +832,27 @@ function JsonlToolBody({ text, toolName }: { text: string; toolName: string }) {
     </pre>
   ) : (
     <pre className="whitespace-pre-wrap break-words text-xs leading-5">
-      {afterTag || 'No arguments'}
+      {afterTag || t('filePreview.jsonl.noArguments')}
     </pre>
   )
 }
 
 function JsonlMarkdownBody({ content }: { content: string }) {
+  const { t } = useTranslation('resources')
   return (
     <div className="prose prose-sm max-w-none break-words dark:prose-invert dark:prose-pre:bg-muted-foreground/20">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-        {content || 'Empty message'}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={markdownComponents}
+      >
+        {content || t('filePreview.jsonl.emptyMessage')}
       </ReactMarkdown>
     </div>
   )
 }
 
 function JsonlMessageCard({ record }: { record: JsonlRecord }) {
+  const { t } = useTranslation('resources')
   const [expanded, setExpanded] = useState(false)
   const message = useMemo(() => getJsonlMessage(record), [record])
   const isTool = Boolean(message.toolName || message.kind === 'tool-result')
@@ -778,7 +898,7 @@ function JsonlMessageCard({ record }: { record: JsonlRecord }) {
         <JsonlMarkdownBody content={body} />
       ) : (
         <pre className="whitespace-pre-wrap break-words text-xs leading-5">
-          {body || 'Empty message'}
+          {body || t('filePreview.jsonl.emptyMessage')}
         </pre>
       )}
 
@@ -793,7 +913,9 @@ function JsonlMessageCard({ record }: { record: JsonlRecord }) {
             className="ml-auto rounded border px-2 py-0.5 font-medium text-primary hover:border-primary"
             onClick={() => setExpanded((current) => !current)}
           >
-            {expanded ? 'Collapse' : 'Expand'}
+            {expanded
+              ? t('filePreview.jsonl.collapse')
+              : t('filePreview.jsonl.expand')}
           </button>
         ) : null}
       </div>
@@ -802,6 +924,7 @@ function JsonlMessageCard({ record }: { record: JsonlRecord }) {
 }
 
 function JsonlPreview({ content }: { content: string }) {
+  const { t } = useTranslation('resources')
   const [dialogMode, setDialogMode] = useState(true)
   const [showTools, setShowTools] = useState(() => {
     if (typeof window === 'undefined') return true
@@ -828,7 +951,7 @@ function JsonlPreview({ content }: { content: string }) {
   if (!records.length) {
     return (
       <div className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
-        Empty JSONL.
+        {t('filePreview.jsonl.emptyJsonl')}
       </div>
     )
   }
@@ -837,12 +960,14 @@ function JsonlPreview({ content }: { content: string }) {
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
         <span className="font-medium text-primary">
-          {records.length} record{records.length === 1 ? '' : 's'}
+          {t('filePreview.jsonl.recordCount', { count: records.length })}
         </span>
         <div className="flex items-center gap-2">
           {dialogMode && hasTools ? (
             <label className="inline-flex cursor-pointer items-center gap-2">
-              <span className="font-medium">toolcall</span>
+              <span className="font-medium">
+                {t('filePreview.jsonl.toolcall')}
+              </span>
               <input
                 type="checkbox"
                 className="peer sr-only"
@@ -860,7 +985,9 @@ function JsonlPreview({ content }: { content: string }) {
           ) : null}
           <label className="inline-flex cursor-pointer items-center gap-2">
             <span className="font-medium">
-              {dialogMode ? 'Dialog' : 'JSONL'}
+              {dialogMode
+                ? t('filePreview.jsonl.dialogMode')
+                : t('filePreview.jsonl.rawMode')}
             </span>
             <input
               type="checkbox"
@@ -892,6 +1019,7 @@ function JsonlPreview({ content }: { content: string }) {
 
 export function FilePreview({
   file,
+  hideDirectoryHeader = false,
   onClose,
   showCloseButton = true,
 }: FilePreviewProps) {
@@ -1079,67 +1207,74 @@ export function FilePreview({
   const visibleDirectoryLevels = availableDirectoryLevels.filter((level) =>
     activeDirectoryLevels.has(level.id),
   )
+  const showHeader = !(hideDirectoryHeader && file.isDir)
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{file.name}</div>
-            <div className="text-xs text-muted-foreground">
-              {file.isDir ? 'Folder' : formatSize(file.sizeBytes ?? file.size)}{' '}
-              · {file.modTime || '-'}
+      {showHeader ? (
+        <div className="flex min-h-14 items-center justify-between border-b px-4">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium leading-5">
+                {file.name}
+              </div>
+              {!file.isDir ? (
+                <div className="text-xs leading-5 text-muted-foreground">
+                  {formatSize(file.sizeBytes ?? file.size)} ·{' '}
+                  {file.modTime || '-'}
+                </div>
+              ) : null}
             </div>
+            {editing ? (
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={saving}
+                  onClick={() => setEditing(false)}
+                >
+                  <XCircle className="mr-1 size-3.5" />
+                  {t('filePreview.cancel')}
+                </Button>
+                <Button
+                  size="sm"
+                  className="active:scale-[0.96] transition-transform"
+                  disabled={saving}
+                  onClick={handleSave}
+                >
+                  {saving ? (
+                    <Loader2 className="mr-1 size-3.5 animate-spin" />
+                  ) : (
+                    <Save className="mr-1 size-3.5" />
+                  )}
+                  {t('filePreview.save')}
+                </Button>
+              </div>
+            ) : (
+              canEdit && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setEditing(true)}
+                >
+                  <Pencil className="mr-1 size-3.5" />
+                  {t('filePreview.edit')}
+                </Button>
+              )
+            )}
           </div>
-          {editing ? (
-            <div className="flex items-center gap-1">
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={saving}
-                onClick={() => setEditing(false)}
-              >
-                <XCircle className="mr-1 size-3.5" />
-                {t('filePreview.cancel')}
-              </Button>
-              <Button
-                size="sm"
-                className="active:scale-[0.96] transition-transform"
-                disabled={saving}
-                onClick={handleSave}
-              >
-                {saving ? (
-                  <Loader2 className="mr-1 size-3.5 animate-spin" />
-                ) : (
-                  <Save className="mr-1 size-3.5" />
-                )}
-                {t('filePreview.save')}
-              </Button>
-            </div>
-          ) : (
-            canEdit && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setEditing(true)}
-              >
-                <Pencil className="mr-1 size-3.5" />
-                {t('filePreview.edit')}
-              </Button>
-            )
-          )}
+          {showCloseButton ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-10"
+              onClick={onClose}
+            >
+              <X className="size-4" />
+            </Button>
+          ) : null}
         </div>
-        {showCloseButton ? (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="size-10"
-            onClick={onClose}
-          >
-            <X className="size-4" />
-          </Button>
-        ) : null}
-      </div>
+      ) : null}
 
       {editing && preview?.content != null ? (
         <div className="h-full min-h-0 p-2">
@@ -1232,11 +1367,11 @@ export function FilePreview({
                   </div>
                 ) : availableDirectoryLevels.length === 0 ? (
                   <div className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
-                    No abstract or overview available for this folder.
+                    {t('filePreview.noDirectoryContext')}
                   </div>
                 ) : visibleDirectoryLevels.length === 0 ? (
                   <div className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
-                    Select a chip to show folder context.
+                    {t('filePreview.selectDirectoryContext')}
                   </div>
                 ) : (
                   <div className="grid gap-5">
@@ -1327,21 +1462,16 @@ export function FilePreview({
               <article className="prose prose-sm max-w-none break-words dark:prose-invert dark:prose-pre:bg-muted-foreground/20">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
+                  urlTransform={(url) => url}
                   components={{
                     ...markdownComponents,
-                    img: ({ src, alt }) => {
-                      const resolvedSrc = src
-                        ? resolveMarkdownAssetUrl(String(src), file.uri)
-                        : String(src || '')
-                      return (
-                        <img
-                          src={resolvedSrc}
-                          alt={alt || ''}
-                          loading="lazy"
-                          className="max-w-full rounded-md outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
-                        />
-                      )
-                    },
+                    img: ({ src, alt }) => (
+                      <MarkdownImage
+                        src={src ? String(src) : undefined}
+                        alt={alt}
+                        fileUri={file.uri}
+                      />
+                    ),
                     a: ({ href, children }) => {
                       const resolvedHref = href
                         ? resolveMarkdownAssetUrl(String(href), file.uri)

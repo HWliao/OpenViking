@@ -29,8 +29,6 @@
 
 ---
 
-✨ **2026年5月アップデート**：OpenViking の User Memory、Agent Memory、ナレッジベースQA 3シナリオにおけるベンチマーク結果を更新しました。→ [評価ハイライト](#評価ハイライト) をご確認ください。
-
 ## 概要
 
 ### エージェント開発における課題
@@ -57,9 +55,13 @@ OpenVikingを使えば、開発者はローカルファイルを管理するよ�
 - **可視化された検索軌跡** → **観察可能なコンテキスト**: ディレクトリ検索軌跡の可視化をサポートし、ユーザーが問題の根本原因を明確に観察し、検索ロジックの最適化を導くことを可能に。
 - **自動セッション管理** → **コンテキストの自己反復**: 会話中のコンテンツ、リソース参照、ツール呼び出しなどを自動的に圧縮し、長期メモリを抽出して、使うほどエージェントを賢く。
 
+---
+
 ## クイックスタート
 
-### 前提条件
+### ローカルデプロイ
+
+#### 前提条件
 
 OpenVikingを始める前に、環境が以下の要件を満たしていることを確認してください：
 
@@ -69,15 +71,15 @@ OpenVikingを始める前に、環境が以下の要件を満たしているこ�
 - **オペレーティングシステム**: Linux、macOS、Windows
 - **ネットワーク接続**: 安定したネットワーク接続が必要（依存関係のダウンロードとモデルサービスへのアクセスのため）
 
-### 1. インストール
+#### 1. インストール
 
-#### Pythonパッケージ
+##### Pythonパッケージ
 
 ```bash
 pip install openviking --upgrade --force-reinstall
 ```
 
-#### Rust CLI（オプション）
+##### Rust CLI（オプション）
 
 ```bash
 npm i -g @openviking/cli
@@ -89,13 +91,13 @@ npm i -g @openviking/cli
 cargo install --git https://github.com/volcengine/OpenViking ov_cli
 ```
 
-### 2. モデルの準備
+#### 2. モデルの準備
 
 OpenVikingには以下のモデル機能が必要です：
 - **VLMモデル**: 画像とコンテンツの理解用
 - **Embeddingモデル**: ベクトル化とセマンティック検索用
 
-#### サポートされているVLMプロバイダー
+##### サポートされているVLMプロバイダー
 
 OpenVikingは3つのVLMプロバイダーをサポートしています：
 
@@ -104,7 +106,7 @@ OpenVikingは3つのVLMプロバイダーをサポートしています：
 | `volcengine` | Volcengine Doubaoモデル | [Volcengineコンソール](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_content=OpenViking&utm_medium=devrel&utm_source=OWO&utm_term=OpenViking) |
 | `openai` | OpenAI公式API | [OpenAIプラットフォーム](https://platform.openai.com) |
 
-#### プロバイダー固有の注意事項
+##### プロバイダー固有の注意事項
 
 <details>
 <summary><b>Volcengine（Doubao）</b></summary>
@@ -168,9 +170,9 @@ OpenAIの公式APIを使用：
 
 </details>
 
-### 3. 環境設定
+#### 3. 環境設定
 
-#### サーバー設定テンプレート
+##### サーバー設定テンプレート
 
 設定ファイル `~/.openviking/ov.conf` を作成します。コピー前にコメントを削除してください：
 
@@ -198,14 +200,14 @@ OpenAIの公式APIを使用：
     "api_key"  : "<your-api-key>",     // モデルサービスAPIキー
     "provider" : "<provider-type>",    // プロバイダータイプ（volcengine、openai、deepseek、anthropicなど）
     "model"    : "<model-name>",       // VLMモデル名（例：doubao-seed-2-0-pro-260215 または gpt-4-vision-preview）
-    "max_concurrent": 64              // セマンティック処理の最大同時LLM呼び出し数（デフォルト: 64）
+    "max_concurrent": 100              // セマンティック処理の最大同時LLM呼び出し数（デフォルト: 100）
   }
 }
 ```
 
 > **注意**: Embeddingモデルについては、`volcengine`（Doubao）、`openai`、`azure`、`jina`、`ollama`、`voyage`、`dashscope`、`minimax`、`cohere`、`vikingdb`、`gemini`（`pip install "google-genai>=1.0.0"` が必要）、`litellm`、`local` プロバイダーがサポートされています。VLMモデルについては、`volcengine`、`openai`、`openai-codex`、`kimi`、`glm` をサポートしています。
 
-#### サーバー設定例
+##### サーバー設定例
 
 👇 お使いのモデルサービスの設定例を展開して確認：
 
@@ -236,7 +238,7 @@ OpenAIの公式APIを使用：
     "api_key"  : "your-volcengine-api-key",
     "provider" : "volcengine",
     "model"    : "doubao-seed-2-0-pro-260215",
-    "max_concurrent": 64
+    "max_concurrent": 100
   }
 }
 ```
@@ -270,14 +272,14 @@ OpenAIの公式APIを使用：
     "api_key"  : "your-openai-api-key",
     "provider" : "openai",
     "model"    : "gpt-4-vision-preview",
-    "max_concurrent": 64
+    "max_concurrent": 100
   }
 }
 ```
 
 </details>
 
-#### サーバー設定の環境変数の設定
+##### サーバー設定の環境変数の設定
 
 設定ファイルを作成後、環境変数を設定してファイルを指定します（Linux/macOS）：
 
@@ -301,7 +303,7 @@ set "OPENVIKING_CONFIG_FILE=%USERPROFILE%\.openviking\ov.conf"
 
 > 💡 **ヒント**: 設定ファイルは他の場所に配置することもできます。環境変数で正しいパスを指定するだけです。
 
-#### CLI/クライアント設定例
+##### CLI/クライアント設定例
 
 👇 CLI/クライアントの設定例を展開して確認：
 
@@ -334,13 +336,13 @@ $env:OPENVIKING_CLI_CONFIG_FILE = "$HOME/.openviking/ovcli.conf"
 set "OPENVIKING_CLI_CONFIG_FILE=%USERPROFILE%\.openviking\ovcli.conf"
 ```
 
-### 4. 最初の例を実行
+#### 4. 最初の例を実行
 
 > 📝 **前提条件**: 前のステップで設定（ov.confとovcli.conf）が完了していることを確認してください。
 
 それでは、完全な例を実行してOpenVikingのコア機能を体験しましょう。
 
-#### サーバーの起動
+##### サーバーの起動
 
 ```bash
 openviking-server
@@ -352,7 +354,7 @@ openviking-server
 nohup openviking-server > /data/log/openviking.log 2>&1 &
 ```
 
-#### CLIの実行
+##### CLIの実行
 
 ```bash
 ov status
@@ -365,6 +367,10 @@ ov grep "openviking" --uri viking://resources/volcengine/OpenViking/docs/zh
 ```
 
 おめでとうございます！OpenVikingの実行に成功しました 🎉
+
+### 商用版へのアクセス
+
+OpenViking Personal が正式に提供開始されました。オープンソース版と比較して、Service 版は公式にホスティングされてすぐに利用でき、VikingDB によりローカルハードウェアをはるかに超える規模までスケールし、より豊富な統合機能とプロフェッショナルサポートが付属します。最大 50 ファイルまでの無料トライアルが含まれており、既存のオープンソース版ユーザーは移行ツールを使ってスムーズに乗り換えることができます。
 
 ### VikingBotクイックスタート
 
@@ -395,76 +401,34 @@ ov chat
 
 👉 **[参照: サーバーデプロイ＆ECSセットアップガイド](./docs/en/getting-started/03-quickstart-server.md)**
 
----
 
-## 評価ハイライト
+## OpenClawコンテキストプラグインの詳細
 
-OpenViking の中核的な価値は、**より高い回答精度**を実現しながら、**より少ないトークン消費**と**より低いレイテンシ**を両立することです。以下では、3 つの評価シナリオをまとめます。
+* テストデータセット: LoCoMo10（https://github.com/snap-research/locomo）の長距離対話に基づく効果テスト（ground truthのないcategory5を除いた合計1,540ケース）
+* 実験グループ: ユーザーがOpenVikingを使用する際にOpenClawのネイティブメモリを無効にしない可能性があるため、ネイティブメモリの有効/無効の実験グループを追加
+* OpenVikingバージョン: 0.1.18
+* モデル: seed-2.0-code
+* 評価スクリプト: https://github.com/ZaynJarvis/openclaw-eval/tree/main
 
-### 1. ユーザーメモリ評価
+| 実験グループ | タスク完了率 | コスト: 入力トークン数（合計） |
+|----------|------------------|------------------|
+| OpenClaw(memory-core) |	35.65% |	24,611,530 |
+| OpenClaw + LanceDB (-memory-core) |	44.55% |	51,574,530 |
+| OpenClaw + OpenViking Plugin (-memory-core) |	52.08% |	4,264,396 |
+| OpenClaw + OpenViking Plugin (+memory-core) |	51.23% |	2,099,622 |
 
-**目的**: OpenViking を各種 Agent の外部メモリとして接続したとき、長対話メモリ QA（LOCOMO）における精度・Token 効率・レイテンシを検証します。
+* 実験結果:
+OpenViking統合後：
+- ネイティブメモリ有効時: オリジナルOpenClawと比較して43%改善、入力トークンコスト91%削減。LanceDBと比較して15%改善、入力トークンコスト96%削減。
+- ネイティブメモリ無効時: オリジナルOpenClawと比較して49%改善、入力トークンコスト83%削減。LanceDBと比較して17%改善、入力トークンコスト92%削減。
 
-| 構成 | 平均 Query 時間 | 回答精度 | 総入力 Token |
-|:----:|----------------:|---------:|-------------:|
-| OpenClaw + native memory-core | 95.14s | 24.20% | 392,559,404 |
-| **OpenClaw + OpenViking** | **38.8s** | **82.08%** | **37,423,456** |
-| Hermes Native Memory | 82.4s | 33.38% | 79,228,398 |
-| **Hermes + OpenViking** | **27.9s** | **82.86%** | **52,026,755** |
-| Claude Code Auto-Memory | 49.1s | 57.21% | 353,306,422 |
-| **Claude Code + OpenViking** | **20.4s** | **80.32%** | **129,968,899** |
+👉 **[参照: OpenClawコンテキストプラグイン](examples/openclaw-plugin/README.md)**
 
-#### 1.1 主要な効率改善
+👉 **[参照: OpenCode統合プラグイン](examples/opencode-plugin/README.md)**
 
-| Agent | 精度向上 | レイテンシ低減 | Token 削減 |
-|:-----:|---------:|---------------:|-----------:|
-| OpenClaw | 24.20% → 82.08% (+3.39×) | -59.22% | **-91.0%** |
-| Hermes | 33.38% → 82.86% (+2.48×) | -66.10% | -34.3% |
-| Claude Code | 57.21% → 80.32% (+1.40×) | -58.45% | -63.2% |
+👉 **[参照: Claude Codeメモリプラグインの例](examples/claude-code-memory-plugin/README.md)**
 
-### 2. Agent経験メモリ評価
-
-| 構成 | Retail 正答率 | Airline 正答率 |
-|:----:|--------------:|---------------:|
-| LLMのみ | 70.94% | 54.38% |
-| **LLM + OpenViking 経験メモリ** | **77.81% (+6.87pp)** | **66.25% (+11.87pp)** |
-
-### 3. ナレッジベースQA評価
-
-| 手法 | 検索方式 | Accuracy | Token / QA | レイテンシ / QA |
-|:----:|:--------:|---------:|-----------:|----------------:|
-| Naive RAG | ベクトル検索 | 62.50% | 1,290 | **0.11s** |
-| HippoRAG 2 | ベクトル + 知識グラフ | 61.00% | 726 | 20s |
-| LightRAG | ベクトル + 知識グラフ | 89.00% | 28,443 | 75s |
-| LangChain SQL (Agent) | SQL + Agent | 78.00% | 4,776 | 132s |
-| OpenViking (top5) | ベクトル検索 | 72.75% | 3,154 | 0.22s |
-| **OpenViking (top20)** | **ベクトル検索** | **91.00%** | **12,533** | **0.23s** |
-
-> この比較では、OpenViking は HotpotQA の top20 設定で最高精度（91%）を達成し、同時にレイテンシを 0.23s に抑えています。
-
-#### 3.1 5つのオープンソースデータセットにおける単一ターンRAG
-
-| 手法 | 検索方式 | 平均 Accuracy | インデックス構築 Token | Token / QA | 検索レイテンシ |
-|:----:|:--------:|--------------:|-----------------------:|-----------:|---------------:|
-| Naive RAG | ベクトル検索 | 53.93% | 2,755,356 | 1,435 | **0.13s** |
-| PageIndex | ベクトル + 木構造 | 36.75% | 5,609,206 | 710,480 | 84.60s |
-| HippoRAG 2 | ベクトル + 知識グラフ | 44.50% | 124,963,618 | **637** | 18.83s |
-| LightRAG | ベクトル + 知識グラフ | **76.00%** | 62,705,469 | 27,035 | 9.19s |
-| **OpenViking** | **ベクトル検索** | **66.87%** | **8,671,538** | **3,060** | **0.19s** |
-
-> 対象データセット: FinanceBench、NaturalQuestions、ClapNQ、Qasper、SyllabusQA。OpenViking は非常に低い検索レイテンシ（0.19s）を維持しながら平均 66.87% の精度を達成し、インデックス構築コストは LightRAG の 13.8% にとどまります。
-
----
-
-## 学術的裏付け
-
-OpenViking は、論文 `VikingMem` で述べられている中核能力の一部をオープンソース化したものであり、AI エージェント開発者がそのコンテキストデータベースとメモリ管理の考え方を直接利用できるようにしています。
-
-> **VikingMem: A Memory Base Management System for Stateful LLM-based Applications**
-> Jiajie Fu, Junwen Chen, Mengzhao Wang, Aoxiang He, Maojia Sheng, Xiangyu Ke, Yifan Zhu, and Yunjun Gao.
-> arXiv:2605.29640, 2026. VLDB 2026 に採択。
->
-> 📄 [arXiv で論文を読む](https://arxiv.org/abs/2605.29640)
+--
 
 ## コアコンセプト
 
@@ -594,7 +558,7 @@ AIエージェントのコンテキスト管理の未来を共に定義し、構
 OpenVikingプロジェクトは、コンポーネントごとに異なるライセンスを使用しています：
 
 - **メインプロジェクト**: AGPLv3 - 詳細は[LICENSE](./LICENSE)ファイルを参照してください
-- **crates/ov_cli**: Apache 2.0 - 詳細は[LICENSE](./crates/LICENSE)ファイルを参照してください
+- **crates/ov_cli**: Apache 2.0 - 詳細は[LICENSE](./crates/ov_cli/LICENSE)ファイルを参照してください
 - **examples**: Apache 2.0 - 詳細は[LICENSE](./examples/LICENSE)ファイルを参照してください
 - **third_party**: 各サードパーティプロジェクトの元のライセンス
 

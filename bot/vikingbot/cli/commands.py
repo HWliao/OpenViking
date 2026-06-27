@@ -26,7 +26,13 @@ from vikingbot import __logo__, __version__
 from vikingbot.agent.loop import AgentLoop
 from vikingbot.bus.queue import MessageBus
 from vikingbot.channels.manager import ChannelManager
-from vikingbot.config.loader import ensure_config, get_config_path, get_data_dir, load_config
+from vikingbot.config.loader import (
+    ensure_config,
+    get_config_path,
+    get_data_dir,
+    load_config,
+    validate_openviking_auth,
+)
 from vikingbot.config.schema import SessionKey, requires_gateway_token
 from vikingbot.cron.service import CronService
 from vikingbot.cron.types import CronJob
@@ -65,6 +71,17 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+
+
+def _warn_deprecated_memory_user(memory_user: list[str] | None) -> None:
+    if not memory_user:
+        return
+    typer.secho(
+        "Warning: --memory-user is deprecated and only kept for explicit owner-user lookup. "
+        "Use --memory-peer for the current OpenViking User/Peer model.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
 
 
 def get_or_create_machine_id() -> str:
@@ -253,6 +270,7 @@ def _make_provider(config, langfuse_client: None = None):
 
     p = config.agents
     model = p.model if p else None
+    temperature = p.temperature if p else 0.7
     api_key = p.api_key if p else None
     api_base = p.api_base if p else None
     provider_name = p.provider if p else None
@@ -272,6 +290,7 @@ def _make_provider(config, langfuse_client: None = None):
         vlm_config: dict[str, Any] = {
             "provider": provider_name,
             "model": model,
+            "temperature": temperature,
         }
         if api_key:
             vlm_config["api_key"] = api_key
@@ -324,6 +343,7 @@ def gateway(
     bus = MessageBus()
     path = Path(config_path).expanduser() if config_path is not None else None
     config = ensure_config(path)
+    validate_openviking_auth(config)
     effective_host = host if host is not None else config.gateway.host
     effective_port = port if port is not None else config.gateway.port
     gateway_token = _get_gateway_token(config)
@@ -425,6 +445,7 @@ def prepare_agent_loop(config, bus, session_manager, cron, quiet: bool = False, 
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.model,
+        temperature=config.agents.temperature,
         max_iterations=config.agents.max_tool_iterations,
         memory_window=config.agents.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -613,6 +634,7 @@ def prepare_agent_channel(
     logs: bool,
     eval: bool = False,
     sender: str | None = None,
+    memory_peer: list[str] | None = None,
     memory_user: list[str] | None = None,
 ):
     """Prepare channel for agent command."""
@@ -622,7 +644,10 @@ def prepare_agent_channel(
     channels = ChannelManager(bus)
     if message is not None:
         # Single message mode - use SingleTurnChannel for clean output
-        channel_config = SingleTurnChannelConfig(memory_user=memory_user)
+        channel_config = SingleTurnChannelConfig(
+            memory_peer=memory_peer,
+            memory_user=memory_user,
+        )
         channel = SingleTurnChannel(
             channel_config,
             bus,
@@ -636,7 +661,10 @@ def prepare_agent_channel(
         channels.add_channel(channel)
     else:
         # Interactive mode - use ChatChannel with thinking display
-        channel_config = ChatChannelConfig(memory_user=memory_user)
+        channel_config = ChatChannelConfig(
+            memory_peer=memory_peer,
+            memory_user=memory_user,
+        )
         channel = ChatChannel(
             channel_config,
             bus,
@@ -670,8 +698,13 @@ def chat(
     sender: str = typer.Option(
         None, "--sender", help="Sender ID, same usage as feishu channel sender"
     ),
+    memory_peer: list[str] = typer.Option(
+        None, "--memory-peer", help="Peer ID for memory retrieval (can be repeated)"
+    ),
     memory_user: list[str] = typer.Option(
-        None, "--memory-user", help="User ID for memory retrieval (can be repeated)"
+        None,
+        "--memory-user",
+        help="Deprecated legacy OpenViking user ID for root-key memory fanout",
     ),
 ):
     """Interact with the agent directly."""
@@ -679,10 +712,18 @@ def chat(
 
     bus = MessageBus()
     config = ensure_config(path)
+    validate_openviking_auth(config)
+    _warn_deprecated_memory_user(memory_user)
     _init_bot_data(config)
 
     logger.remove()
-    log_file = get_data_dir() / "log" / f"vikingbot.debug.{os.getpid()}.log"
+    configured_log_file = os.environ.get("VIKINGBOT_LOG_FILE")
+    log_file = (
+        Path(configured_log_file).expanduser()
+        if configured_log_file
+        else get_data_dir() / "log" / f"vikingbot.debug.{os.getpid()}.log"
+    )
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     logger.add(
         log_file,
         level="DEBUG",
@@ -706,7 +747,16 @@ def chat(
         session_id = get_or_create_machine_id()
     cron = prepare_cron(bus, quiet=is_single_turn)
     channels = prepare_agent_channel(
-        config, bus, message, session_id, markdown, logs, eval, sender, memory_user
+        config,
+        bus,
+        message,
+        session_id,
+        markdown,
+        logs,
+        eval,
+        sender,
+        memory_peer,
+        memory_user,
     )
     agent_loop = prepare_agent_loop(
         config, bus, session_manager, cron, quiet=is_single_turn, eval=eval

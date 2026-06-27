@@ -2,6 +2,7 @@ import fs from "fs"
 import path from "path"
 import {
   log,
+  effectivePeerId,
   makeRequest,
   safeStringify,
   unwrapResponse,
@@ -348,10 +349,13 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
   async function addMessageToSession(mapping, role, content) {
     try {
+      const body = { role, content }
+      const peerId = effectivePeerId(config)
+      if (peerId) body.peer_id = peerId
       const response = await makeRequest(getMappingConfig(mapping), {
         method: "POST",
         endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/messages`,
-        body: { role, content },
+        body,
         timeoutMs: 5000,
       })
       unwrapResponse(response)
@@ -536,6 +540,27 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     await saveSessionMap()
   }
 
+  async function flushSession(opencodeSessionId, { commit = false, reason = "manual" } = {}) {
+    const mapping = sessionMap.get(opencodeSessionId)
+    if (!mapping) return false
+
+    await flushPendingMessages(opencodeSessionId, mapping)
+    if (commit) {
+      if (mapping.commitInFlight) {
+        monitorBackgroundCommit(mapping, opencodeSessionId)
+      } else if (mapping.capturedMessages.size > 0) {
+        log("INFO", "session", "Committing OpenViking session at lifecycle boundary", {
+          opencode_session: opencodeSessionId,
+          openviking_session: mapping.ovSessionId,
+          reason,
+        })
+        await startBackgroundCommit(mapping, opencodeSessionId)
+      }
+    }
+    await saveSessionMap()
+    return true
+  }
+
   async function commitSession(sessionId, opencodeSessionId, abortSignal) {
     const mapped = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
     let mapping = mapped
@@ -567,6 +592,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     getRequestConfig,
     commitSession,
     flushAll,
+    flushSession,
   }
 
   function createSessionMapping(ovSessionId, agentId) {

@@ -10,20 +10,23 @@ import pytest
 import pytest_asyncio
 
 from openviking_cli.client.http import AsyncHTTPClient
-from openviking_cli.exceptions import ConflictError, FailedPreconditionError, ProcessingError
-from tests.server.conftest import SAMPLE_MD_CONTENT, SDK_ROOT_API_KEY, TEST_TMP_DIR
+from openviking_cli.exceptions import ConflictError, ProcessingError
+from tests.server.conftest import SAMPLE_MD_CONTENT, TEST_TMP_DIR
 from tests.server.ovpack_test_helpers import build_ovpack_bytes
 
 
 @pytest_asyncio.fixture()
 async def http_client(running_server):
     """Create an AsyncHTTPClient connected to the running server."""
-    port, svc = running_server
+    port, svc, sdk_user_key = running_server
     client = AsyncHTTPClient(
         url=f"http://127.0.0.1:{port}",
-        api_key=SDK_ROOT_API_KEY,
-        account="default",
-        user="sdk_test_user",
+        api_key=sdk_user_key,
+        account="",
+        user="",
+        timeout=33.0,
+        extra_headers={},
+        profile_enabled=False,
     )
     await client.initialize()
     yield client, svc
@@ -113,7 +116,7 @@ description: SDK localhost upload test
     assert "root_uri" in result
     assert "uri" in result
     assert result["root_uri"] == result["uri"]
-    assert result["uri"].startswith("viking://agent/default/skills/")
+    assert result["uri"].startswith("viking://user/sdk_test_user/skills/")
 
 
 async def test_sdk_import_ovpack_from_local_file(http_client):
@@ -213,13 +216,13 @@ async def test_sdk_batch_add_messages_and_commit_keep_recent_count(http_client):
         [
             {
                 "role": "user",
-                "role_id": "sdk-user-1",
+                "peer_id": "sdk-user-1",
                 "created_at": "2026-05-01T12:00:00Z",
                 "parts": [{"type": "text", "text": "Batch hello"}],
             },
             {
                 "role": "assistant",
-                "role_id": "sdk-bot-1",
+                "peer_id": "sdk-bot-1",
                 "created_at": "2026-05-01T12:00:05Z",
                 "parts": [
                     {"type": "text", "text": "Batch answer"},
@@ -241,7 +244,7 @@ async def test_sdk_batch_add_messages_and_commit_keep_recent_count(http_client):
 
     pre_commit = await client.get_session_context(session_id)
     assert [m["role"] for m in pre_commit["messages"]] == ["user", "assistant", "user"]
-    assert pre_commit["messages"][0]["role_id"] == "sdk-user-1"
+    assert pre_commit["messages"][0]["peer_id"] == "sdk-user-1"
     assert pre_commit["messages"][0]["created_at"] == "2026-05-01T12:00:00Z"
     assert pre_commit["messages"][1]["parts"][1]["type"] == "context"
     assert pre_commit["messages"][1]["parts"][1]["abstract"] == "SDK doc abstract"
@@ -287,7 +290,16 @@ async def test_sdk_commit_session_keeps_telemetry_as_second_positional_argument(
 
 
 async def test_sdk_get_session_archive(http_client):
-    client, _ = http_client
+    client, svc = http_client
+
+    # Memory extraction uses a VLM backend the fake does not cover; stub it so
+    # the archive completes (this test checks archive retrieval, not extraction).
+    async def _no_memories(*args, **kwargs):
+        del args, kwargs
+        return []
+
+    svc.session_compressor.extract_long_term_memories = _no_memories
+    svc.session_compressor.extract_execution_memories = _no_memories
 
     session_info = await client.create_session()
     session_id = session_info["session_id"]
@@ -309,7 +321,7 @@ async def test_sdk_get_session_archive(http_client):
     assert [m["parts"][0]["text"] for m in archive["messages"]] == ["Archive me"]
 
 
-async def test_sdk_commit_raises_failed_precondition_after_failed_archive(http_client):
+async def test_sdk_commit_not_blocked_after_failed_archive(http_client):
     client, svc = http_client
 
     session_info = await client.create_session()
@@ -325,15 +337,21 @@ async def test_sdk_commit_raises_failed_precondition_after_failed_archive(http_c
     commit_result = await client.commit_session(session_id)
     task_id = commit_result["task_id"]
 
+    task = None
     for _ in range(100):
         task = await client.get_task(task_id)
         if task and task["status"] in ("completed", "failed"):
             break
         await asyncio.sleep(0.1)
 
+    # Any Phase 2 step failing marks the whole archive .failed.json (skipped).
+    assert task is not None and task["status"] == "failed"
+
+    # A failed archive is a skippable terminal state and must not block the
+    # next commit (this previously raised FailedPreconditionError).
     await client.add_message(session_id, "user", "Second round")
-    with pytest.raises(FailedPreconditionError, match="unresolved failed archive"):
-        await client.commit_session(session_id)
+    second = await client.commit_session(session_id)
+    assert second["task_id"]
 
 
 # ===================================================================
@@ -352,6 +370,42 @@ async def test_sdk_find(http_client):
     result = await client.find(query="sample document", limit=5)
     assert hasattr(result, "resources")
     assert hasattr(result, "total")
+
+
+async def test_sdk_find_accepts_tags(http_client):
+    client, _ = http_client
+    f = TEST_TMP_DIR / "sdk_find_tags.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(SAMPLE_MD_CONTENT)
+    await client.add_resource(path=str(f), reason="find tags test", wait=True)
+
+    result = await client.find(query="sample document", limit=5, tags=["team=search"])
+    assert hasattr(result, "resources")
+
+
+async def test_sdk_search_accepts_tags(http_client):
+    client, _ = http_client
+    f = TEST_TMP_DIR / "sdk_search_tags.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(SAMPLE_MD_CONTENT)
+    await client.add_resource(path=str(f), reason="search tags test", wait=True)
+
+    result = await client.search(query="sample document", limit=5, tags=["team=search"])
+    assert hasattr(result, "resources")
+
+
+async def test_sdk_set_tags_accepts_tags(http_client):
+    client, _ = http_client
+    f = TEST_TMP_DIR / "sdk_write_tags.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("hello")
+    added = await client.add_resource(path=str(f), reason="write tags test", wait=True)
+    uri = added["root_uri"]
+    children = await client.ls(uri, simple=True)
+    file_uri = children[0]
+
+    result = await client.set_tags(file_uri, ["team=search"])
+    assert isinstance(result, dict)
 
 
 async def test_sdk_find_telemetry(http_client):

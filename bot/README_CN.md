@@ -147,15 +147,20 @@ ov chat --no-format
 ### OpenViking Server 配置
 bot 将连接到远程 OpenViking Server，使用前请先启动 OpenViking Server。默认使用 `ov.conf` 中配置的 OpenViking Server 信息。
 - OpenViking 默认启动地址为 `127.0.0.1:1933`
-- 如果配置了 `root_api_key`，则开启多租户模式。详见 [多租户](https://github.com/volcengine/OpenViking/blob/main/examples/multi_tenant/README.md)
+- Vikingbot 会跟随 OpenViking 的 `server.auth_mode`：`api_key` 模式使用 OpenViking User API key；`trusted` 模式使用 `server.root_api_key` 加 trusted identity headers；`dev` 模式仅用于本地。
 - OpenViking Server 配置示例
 ```json
 {
   "server": {
-
+    "auth_mode": "api_key",
     "host": "127.0.0.1",
     "port": 1933,
-    "root_api_key": "test"
+    "root_api_key": "<your-openviking-root-api-key>"
+  },
+  "bot": {
+    "ov_server": {
+      "api_key": "<your-openviking-user-api-key>"
+    }
   }
 }
 ```
@@ -164,6 +169,7 @@ bot 将连接到远程 OpenViking Server，使用前请先启动 OpenViking Serv
 所有配置都位于 `ov.conf` 的 `bot` 字段下，且各配置项都带有默认值。可选手动配置项说明如下：
 - `agents`：Agent 配置
   - `model`：bot 使用的 LLM 模型名。当设置了 `provider` 时，建议直接使用 provider 原生模型名（例如 `doubao-seed-2-0-pro-260215`）。
+  - `temperature`：LLM 请求的采样温度，默认 `0.7`。
   - `provider`：可选的模型 provider 名称。设置后，vikingbot 会通过 OpenViking 的 `VLMFactory` + adapter 路径直接创建后端（例如 `volcengine`、`openai`、`deepseek`）。
   - `api_key`：可选，Agent 模型 provider 的 API Key。若希望 bot 使用独立凭证，可直接在这里配置。
   - `api_base`：可选，Agent 模型 provider 的 API Base。适用于 provider 网关或自定义端点，例如 VolcEngine Ark。
@@ -174,17 +180,25 @@ bot 将连接到远程 OpenViking Server，使用前请先启动 OpenViking Serv
 - `gateway`：Gateway 配置
   - host：Gateway 监听地址，默认值为 `0.0.0.0`
   - port：Gateway 监听端口，默认值为 `18790`
+  - token：Gateway 鉴权 token。当 `host` 为非 localhost 地址（例如默认的 `0.0.0.0`）时必须设置——否则网关会拒绝启动（`SECURITY: bot.gateway.token is required when gateway.host is non-localhost`）。请设置为随机密钥；客户端通过 `X-Gateway-Token` 请求头携带。
 - `sandbox`：沙箱配置
   - `mode`：沙箱模式，可选值为 `shared`（所有 session 共享工作空间）或 `private`（私有，按 Channel、session 隔离工作空间）。默认值为 `shared`。
 - `ov_server`：OpenViking Server 配置
   - 若不配置，默认使用 `ov.conf` 中配置的 OpenViking Server 信息。
   - 如果你使用远端 OpenViking Server，可以在这里配置目标服务地址和 API Key。
     - `server_url`：OpenViking Server 基础地址，例如 `https://api.vikingdb.cn-beijing.volces.com/openviking` 或 `http://localhost:1933`。
-    - `root_api_key`：bot 调用 OpenViking Server 时使用的 API Key。尽管字段名保留为 `root_api_key`，但在 `user` key 流程下该字段同样会被使用。
+    - `api_key`：bot 调用 OpenViking Server 使用的 API Key。`api_key` 模式下必须是 OpenViking User key；trusted 模式且 `api_key_type: "root"` 时，该字段就是 OpenViking root key。
+    - `root_api_key`：废弃兼容字段。新配置不要使用；trusted 模式请使用 `api_key` 配合 `api_key_type: "root"`。
     - `account_id`：默认值为 `default`，即 OpenViking 的账号 ID。同一 OpenViking account 下的所有 user 共享 resources。
-    - `api_key_type`：可选 `root` 或 `user`，默认 `root`。`root` 保留原有的 root-key fanout 行为；`user` 切换 bot 走 user-key 流程调用 OpenViking 客户端。对于托管型远端 OpenViking 服务，通常推荐使用 `user`。
-    - `exp_write_tools`：可选，触发经验记忆注入的工具名列表（自演化 agent memory 循环，详见 #2007）。默认 `["write_file", "edit_file"]`。注入仅在 OpenViking Server 启用 `memory.agent_memory_enabled` 时生效，否则此列表无作用。
+    - `api_key_type`：默认由同一个 `ov.conf` 中的 OpenViking `server.auth_mode` 推导：`api_key`/`dev` 为 `user`，`trusted` 为 `root`。通常无需手动配置。
+      如果 `bot.ov_server` 指向另一套 OpenViking Server，且对方使用 trusted 鉴权，请设置 `api_key_type: "root"`，并在 `api_key` 中提供对方的 root key。
+    - `exp_write_tools`：可选，触发经验记忆注入的工具名列表（自演化 agent memory 循环，详见 #2007）。默认 `["write_file", "edit_file"]`。该配置只控制 bot 侧注入触发时机；已存储 experience 的生成由 OpenViking 记忆抽取和当前 session 的 `memory_policy.memory_types` 白名单控制。
     - `recall_exp_first_round_only`：可选。为 `true` 时，`ContextBuilder._build_user_memory` 跳过每轮 user/agent 经验召回，仅在首个 user turn 注入一次经验。默认 `false`。
+    - 每轮 user/peer 记忆召回默认使用 type-quota 检索。`profile.md` 仍由 profile 链路单独注入，不占自动检索候选位。
+    - `memory_recall_events_limit`：可选。每轮召回的 `events/` 记忆条数。默认 `10`。
+    - `memory_recall_entities_limit`：可选。每轮召回的 `entities/` 记忆条数。默认 `10`。
+    - `memory_recall_preferences_limit`：可选。每轮召回的 `preferences/` 记忆条数。默认 `3`。
+    - `memory_recall_max_chars`：可选。注入到上下文的 user/peer 记忆全文字符预算。默认 `4000`。
     - `exp_recall_limit`：可选。召回时每个任务检索的经验条数。默认 `5`。
     - `exp_recall_max_chars`：可选。注入到上下文的格式化经验块的字符预算。默认 `2000`。
 - `channels`：消息平台配置，详见 [消息平台配置](bot/docs/CHANNEL.md)
@@ -197,6 +211,7 @@ bot 将连接到远程 OpenViking Server，使用前请先启动 OpenViking Serv
       "api_key": "<your-ark-api-key>",
       "api_base": "https://ark.cn-beijing.volces.com/api/v3",
       "provider": "volcengine",
+      "temperature": 0.7,
       "max_tool_iterations": 50,
       "memory_window": 50
     },
@@ -210,9 +225,8 @@ bot 将连接到远程 OpenViking Server，使用前请先启动 OpenViking Serv
     },
     "ov_server": {
       "server_url": "https://api.vikingdb.cn-beijing.volces.com/openviking",
-      "root_api_key": "<your-openviking-user-api-key>",
-      "account_id": "default",
-      "api_key_type": "user"
+      "api_key": "<your-openviking-user-api-key>",
+      "account_id": "default"
     },
     "channels": [
       {

@@ -3,10 +3,15 @@ use crate::PrivacyCommands;
 use crate::client;
 use crate::commands;
 use crate::config::merge_csv_options;
+use crate::config_agent;
 use crate::error::{Error, Result};
+use crate::terminal_ui::{
+    RenderedRegion as RenderedSelectRegion, clear_rendered_lines, live_select_block,
+};
 use crate::theme;
 use crate::tui;
 use colored::Colorize;
+use serde_json::{Map, Value};
 
 pub async fn handle_add_resource(
     mut path: String,
@@ -23,6 +28,7 @@ pub async fn handle_add_resource(
     exclude: Option<String>,
     no_directly_upload_media: bool,
     watch_interval: f64,
+    resource_args: Option<String>,
     ctx: CliContext,
 ) -> Result<()> {
     let is_url =
@@ -35,26 +41,9 @@ pub async fn handle_add_resource(
         let unescaped_path = path.replace("\\ ", " ");
         let path_obj = Path::new(&unescaped_path);
         if !path_obj.exists() {
-            eprintln!("Error: Path '{}' does not exist.", path);
-
-            // Check if there might be unquoted spaces
-            use std::env;
-            let args: Vec<String> = env::args().collect();
-
-            if let Some(add_resource_pos) =
-                args.iter().position(|s| s == "add-resource" || s == "add")
-            {
-                if args.len() > add_resource_pos + 2 {
-                    let extra_args = &args[add_resource_pos + 2..];
-                    let suggested_path = format!("{} {}", path, extra_args.join(" "));
-                    eprintln!(
-                        "\nIt looks like you may have forgotten to quote a path with spaces."
-                    );
-                    eprintln!("Suggested command: ov add-resource \"{}\"", suggested_path);
-                }
-            }
-
-            std::process::exit(1);
+            return Err(Error::Client(format!(
+                "Local path does not exist: {path}. If the path contains spaces, wrap it in quotes."
+            )));
         }
         path = unescaped_path;
     }
@@ -72,10 +61,9 @@ pub async fn handle_add_resource(
     }
 
     if exclusive_count > 1 {
-        eprintln!(
-            "Error: Cannot specify more than one of --to, --parent, or --parent-auto-create at the same time."
-        );
-        std::process::exit(1);
+        return Err(Error::Client(
+            "Specify only one of --to, --parent, or --parent-auto-create.".to_string(),
+        ));
     }
 
     let strict = strict_mode;
@@ -85,18 +73,20 @@ pub async fn handle_add_resource(
         merge_csv_options(ctx.config.upload.ignore_dirs.clone(), ignore_dirs);
     let effective_include = merge_csv_options(ctx.config.upload.include.clone(), include);
     let effective_exclude = merge_csv_options(ctx.config.upload.exclude.clone(), exclude);
+    let add_resource_args = parse_add_resource_args(resource_args.as_deref())?;
 
     let effective_timeout = if wait {
         timeout.unwrap_or(60.0).max(ctx.config.timeout)
     } else {
         ctx.config.timeout
     };
+    let auth = ctx.config.effective_auth(ctx.sudo);
     let client = client::HttpClient::new(
         &ctx.config.url,
-        ctx.config.api_key.clone(),
-        ctx.config.agent_id.clone(),
-        ctx.config.account.clone(),
-        ctx.config.user.clone(),
+        auth.api_key,
+        auth.account,
+        auth.user,
+        ctx.config.effective_actor_peer_id(),
         effective_timeout,
         ctx.profile.unwrap_or(ctx.config.profile),
         ctx.config.extra_headers.clone(),
@@ -117,6 +107,7 @@ pub async fn handle_add_resource(
         effective_exclude,
         directly_upload_media,
         watch_interval,
+        add_resource_args,
         ctx.output_format,
         ctx.compact,
         ctx.should_show_progress(),
@@ -125,10 +116,128 @@ pub async fn handle_add_resource(
     .await
 }
 
+fn parse_add_resource_args(raw: Option<&str>) -> Result<Option<Map<String, Value>>> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+
+    if raw.starts_with('{') {
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|e| Error::Client(format!("Invalid --args JSON object: {e}")))?;
+        return match value {
+            Value::Object(map) => Ok(Some(map)),
+            _ => Err(Error::Client(
+                "--args JSON form must be an object, e.g. '{\"feishu_access_token\":\"u-...\"}'"
+                    .to_string(),
+            )),
+        };
+    }
+
+    let mut args = Map::new();
+    for item in split_add_resource_args(raw)? {
+        let Some((key, value)) = item.split_once(':') else {
+            return Err(Error::Client(format!(
+                "Invalid --args item '{item}'. Expected key:value."
+            )));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(Error::Client(
+                "Invalid --args item with empty key.".to_string(),
+            ));
+        }
+        args.insert(key.to_string(), parse_add_resource_arg_value(value.trim()));
+    }
+    Ok(Some(args))
+}
+
+fn split_add_resource_args(raw: &str) -> Result<Vec<String>> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    let mut depth = 0_i32;
+
+    for ch in raw.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            current.push(ch);
+            escape = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            current.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            '{' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '}' | ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(Error::Client("Invalid --args nesting.".to_string()));
+                }
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                let item = current.trim();
+                if !item.is_empty() {
+                    items.push(item.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if quote.is_some() || depth != 0 {
+        return Err(Error::Client(
+            "Invalid --args quoting or nesting.".to_string(),
+        ));
+    }
+    let item = current.trim();
+    if !item.is_empty() {
+        items.push(item.to_string());
+    }
+    Ok(items)
+}
+
+fn parse_add_resource_arg_value(raw: &str) -> Value {
+    if raw.is_empty() {
+        return Value::String(String::new());
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return value;
+    }
+    let unquoted = raw
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            raw.strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(raw);
+    Value::String(unquoted.to_string())
+}
+
 pub async fn handle_add_skill(
     data: String,
     wait: bool,
     timeout: Option<f64>,
+    parent: Option<String>,
     ctx: CliContext,
 ) -> Result<()> {
     let client = ctx.get_client();
@@ -137,6 +246,7 @@ pub async fn handle_add_skill(
         &data,
         wait,
         timeout,
+        parent.as_deref(),
         ctx.should_show_progress(),
         ctx.is_verbose(),
         ctx.output_format,
@@ -241,7 +351,7 @@ pub async fn handle_restore(
     .await
 }
 
-use crate::SystemCommands;
+use crate::{SystemBackendCommands, SystemCommands};
 
 pub async fn handle_system(cmd: SystemCommands, ctx: CliContext) -> Result<()> {
     let client = ctx.get_client();
@@ -266,6 +376,16 @@ pub async fn handle_system(cmd: SystemCommands, ctx: CliContext) -> Result<()> {
             commands::system::consistency(&client, &uri, ctx.output_format, ctx.compact).await
         }
         SystemCommands::Crypto { action } => commands::crypto::handle_crypto(action).await,
+        SystemCommands::Backend { action } => match action {
+            SystemBackendCommands::SyncStatus { uri } => {
+                commands::system::backend_sync_status(&client, &uri, ctx.output_format, ctx.compact)
+                    .await
+            }
+            SystemBackendCommands::SyncRetry { uri } => {
+                commands::system::backend_sync_retry(&client, &uri, ctx.output_format, ctx.compact)
+                    .await
+            }
+        },
     }
 }
 
@@ -282,9 +402,6 @@ pub async fn handle_observer(cmd: ObserverCommands, ctx: CliContext) -> Result<(
         }
         ObserverCommands::Models => {
             commands::observer::models(&client, ctx.output_format, ctx.compact).await
-        }
-        ObserverCommands::Transaction => {
-            commands::observer::transaction(&client, ctx.output_format, ctx.compact).await
         }
         ObserverCommands::Retrieval => {
             commands::observer::retrieval(&client, ctx.output_format, ctx.compact).await
@@ -347,12 +464,14 @@ pub async fn handle_session(cmd: SessionCommands, ctx: CliContext) -> Result<()>
             session_id,
             role,
             content,
+            peer_id,
         } => {
             commands::session::add_message(
                 &client,
                 &session_id,
                 &role,
                 &content,
+                peer_id.as_deref(),
                 ctx.output_format,
                 ctx.compact,
             )
@@ -403,6 +522,9 @@ pub async fn handle_admin(cmd: AdminCommands, ctx: CliContext) -> Result<()> {
             commands::admin::delete_account(&client, &account_id, ctx.output_format, ctx.compact)
                 .await
         }
+        AdminCommands::Migrate { cleanup } => {
+            commands::admin::migrate(&client, cleanup, ctx.output_format, ctx.compact).await
+        }
         AdminCommands::RegisterUser {
             account_id,
             user_id,
@@ -434,9 +556,6 @@ pub async fn handle_admin(cmd: AdminCommands, ctx: CliContext) -> Result<()> {
                 ctx.compact,
             )
             .await
-        }
-        AdminCommands::ListAgents { account_id } => {
-            commands::admin::list_agents(&client, &account_id, ctx.output_format, ctx.compact).await
         }
         AdminCommands::RemoveUser {
             account_id,
@@ -588,7 +707,7 @@ use crate::output;
 
 // Config commands intentionally edit the persisted ovcli.conf files. Runtime
 // overrides carried in CliContext should not change what gets shown or saved.
-pub async fn handle_config(cmd: Option<ConfigCommands>, _ctx: CliContext) -> Result<()> {
+pub async fn handle_config(cmd: Option<ConfigCommands>, ctx: CliContext) -> Result<()> {
     match cmd {
         Some(ConfigCommands::Show) => {
             let config = Config::load()?;
@@ -624,15 +743,47 @@ pub async fn handle_config(cmd: Option<ConfigCommands>, _ctx: CliContext) -> Res
                 }
             }
         }
-        Some(ConfigCommands::Switch) => handle_config_switch().await,
+        Some(ConfigCommands::Switch { name: None }) => handle_config_switch().await,
+        Some(ConfigCommands::Switch { name: Some(name) }) => {
+            handle_config_agent_result(config_agent::switch(name, &ctx), &ctx)
+        }
+        Some(ConfigCommands::List) => handle_config_agent_result(config_agent::list(&ctx), &ctx),
+        Some(ConfigCommands::Delete(args)) => {
+            handle_config_agent_result(config_agent::delete(args, &ctx), &ctx)
+        }
+        Some(ConfigCommands::Add { target }) => {
+            let result = config_agent::add(target, &ctx).await;
+            handle_config_agent_result(result, &ctx)
+        }
+        Some(ConfigCommands::Edit(args)) => {
+            let result = config_agent::edit(args, &ctx).await;
+            handle_config_agent_result(result, &ctx)
+        }
         None => config_wizard::run_config_wizard().await,
+    }
+}
+
+fn handle_config_agent_result(
+    result: std::result::Result<config_agent::AgentOutput, config_agent::AgentError>,
+    ctx: &CliContext,
+) -> Result<()> {
+    match result {
+        Ok(output) => {
+            config_agent::print_success(output, ctx);
+            Ok(())
+        }
+        Err(error) => {
+            let exit_code = error.exit_code();
+            config_agent::print_error(&error, ctx);
+            std::process::exit(exit_code);
+        }
     }
 }
 
 pub async fn handle_language(value: Option<String>) -> Result<()> {
     let language = match value {
         Some(value) => Language::from_code(&value).ok_or_else(|| {
-            Error::Config(format!(
+            Error::Language(format!(
                 "Unsupported language '{value}'. Use 'en' or 'zh-CN'."
             ))
         })?,
@@ -708,10 +859,19 @@ fn language_no_change(language: Language) -> &'static str {
 /// Interactive configuration switcher
 async fn handle_config_switch() -> Result<()> {
     let store = ConfigStore::new()?;
-    let configs = store.list_configs()?;
+    let report = store.list_configs_report()?;
+    let invalid_config_names: Vec<String> = report
+        .invalid_configs
+        .iter()
+        .map(|config| config.name.clone())
+        .collect();
+    let configs = report.configs;
 
     if configs.is_empty() {
-        print!("{}", config_command_ui::render_no_saved_configs());
+        print!(
+            "{}",
+            config_command_ui::render_no_saved_configs(&invalid_config_names)
+        );
         return Ok(());
     }
 
@@ -721,6 +881,7 @@ async fn handle_config_switch() -> Result<()> {
         config_command_ui::render_switch_header(
             active.map(|config| config.name.as_str()),
             active.map(|config| config.kind),
+            &invalid_config_names,
         )
     );
 
@@ -807,9 +968,8 @@ fn prompt_select(prompt: &str, items: &[String], default: usize) -> Result<Selec
 
     use crossterm::{
         cursor,
-        event::{self, Event, KeyCode, KeyModifiers},
-        execute,
-        terminal::{self, Clear, ClearType},
+        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+        execute, terminal,
     };
 
     if items.is_empty() {
@@ -840,80 +1000,71 @@ fn prompt_select(prompt: &str, items: &[String], default: usize) -> Result<Selec
     }
 
     let mut selected = default.min(items.len().saturating_sub(1));
-    let mut rendered_lines = 0usize;
     let _raw_guard = RawGuard::enter()?;
 
-    loop {
-        clear_rendered_lines(rendered_lines)?;
-        let lines = select_lines(prompt, items, selected);
-        rendered_lines = lines.len();
-        print!("{}", live_select_block(&lines));
-        io::stdout().flush()?;
+    // Initial render
+    let lines = select_lines(prompt, items, selected);
+    let mut rendered_region = RenderedSelectRegion::from_lines(&lines, live_select_columns());
+    print!("{}", live_select_block(&lines));
+    io::stdout().flush()?;
 
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Up => {
-                    selected = if selected == 0 {
-                        items.len().saturating_sub(1)
-                    } else {
-                        selected - 1
-                    };
+    loop {
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                match key.code {
+                    KeyCode::Up => {
+                        selected = if selected == 0 {
+                            items.len().saturating_sub(1)
+                        } else {
+                            selected - 1
+                        };
+                    }
+                    KeyCode::Down => selected = (selected + 1) % items.len(),
+                    KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') => {
+                        clear_rendered_region(&rendered_region)?;
+                        return Ok(SelectOutcome::Selected(selected));
+                    }
+                    KeyCode::Esc => {
+                        clear_rendered_region(&rendered_region)?;
+                        return Ok(SelectOutcome::Back);
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        clear_rendered_region(&rendered_region)?;
+                        return Ok(SelectOutcome::Quit);
+                    }
+                    _ => continue,
                 }
-                KeyCode::Down => selected = (selected + 1) % items.len(),
-                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') => {
-                    clear_rendered_lines(rendered_lines)?;
-                    return Ok(SelectOutcome::Selected(selected));
-                }
-                KeyCode::Esc => {
-                    clear_rendered_lines(rendered_lines)?;
-                    return Ok(SelectOutcome::Back);
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    clear_rendered_lines(rendered_lines)?;
-                    return Ok(SelectOutcome::Quit);
-                }
-                _ => {}
+                clear_rendered_region(&rendered_region)?;
+                let lines = select_lines(prompt, items, selected);
+                rendered_region = RenderedSelectRegion::from_lines(&lines, live_select_columns());
+                print!("{}", live_select_block(&lines));
+                io::stdout().flush()?;
             }
+            Event::Resize(_, _) => {
+                clear_rendered_region(&rendered_region)?;
+                let lines = select_lines(prompt, items, selected);
+                rendered_region = RenderedSelectRegion::from_lines(&lines, live_select_columns());
+                print!("{}", live_select_block(&lines));
+                io::stdout().flush()?;
+            }
+            _ => {}
         }
     }
 
-    fn clear_rendered_lines(lines: usize) -> Result<()> {
-        if lines == 0 {
-            return Ok(());
-        }
-        let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            cursor::MoveUp(lines as u16),
-            cursor::MoveToColumn(0)
-        )?;
-        for line in 0..lines {
-            execute!(
-                stdout,
-                cursor::MoveToColumn(0),
-                Clear(ClearType::CurrentLine)
-            )?;
-            if line + 1 < lines {
-                execute!(stdout, cursor::MoveDown(1))?;
-            }
-        }
-        execute!(
-            stdout,
-            cursor::MoveUp(lines.saturating_sub(1) as u16),
-            cursor::MoveToColumn(0)
-        )?;
-        Ok(())
+    fn clear_rendered_region(region: &RenderedSelectRegion) -> Result<()> {
+        clear_rendered_lines(region.rows_to_clear(live_select_columns()))
     }
 }
 
-fn live_select_block(lines: &[String]) -> String {
-    if lines.is_empty() {
-        return String::new();
-    }
+fn live_select_columns() -> usize {
+    crossterm::terminal::size()
+        .map(|(columns, _)| usize::from(columns).saturating_sub(1).max(1))
+        .unwrap_or(80)
+}
 
-    let mut rendered = lines.join("\r\n");
-    rendered.push_str("\r\n");
-    rendered
+#[cfg(test)]
+fn rendered_select_rows(lines: &[String], columns: usize) -> usize {
+    crate::terminal_ui::rendered_row_count(lines, columns)
 }
 
 fn switch_confirmation_labels() -> Vec<String> {
@@ -1064,6 +1215,26 @@ pub async fn handle_write(
     .await
 }
 
+pub async fn handle_set_tags(
+    uri: String,
+    tags: Vec<String>,
+    mode: String,
+    recursive: bool,
+    ctx: CliContext,
+) -> Result<()> {
+    let client = ctx.get_client();
+    commands::content::set_tags(
+        &client,
+        &uri,
+        tags,
+        &mode,
+        recursive,
+        ctx.output_format,
+        ctx.compact,
+    )
+    .await
+}
+
 pub async fn handle_reindex(uri: String, mode: String, wait: bool, ctx: CliContext) -> Result<()> {
     let client = ctx.get_client();
     commands::content::reindex(&client, &uri, &mode, wait, ctx.output_format, ctx.compact).await
@@ -1082,6 +1253,8 @@ pub async fn handle_find(
     after: Option<String>,
     before: Option<String>,
     level: Option<Vec<i32>>,
+    context_type: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
     ctx: CliContext,
 ) -> Result<()> {
     let mut params = vec![format!("--uri={}", uri), format!("-n {}", node_limit)];
@@ -1098,6 +1271,12 @@ pub async fn handle_find(
                 .join(",")
         ));
     }
+    if let Some(ref context_types) = context_type {
+        params.push(format!("--context-type {}", context_types.join(",")));
+    }
+    if let Some(ref t) = tags {
+        params.push(format!("--tags {}", t.join(",")));
+    }
     params.push(format!("\"{}\"", query));
     print_command_echo("ov find", &params.join(" "), ctx.config.echo_command);
     let client = ctx.get_client();
@@ -1111,6 +1290,8 @@ pub async fn handle_find(
         before.as_deref(),
         None,
         level,
+        context_type,
+        tags,
         ctx.output_format,
         ctx.compact,
     )
@@ -1126,6 +1307,8 @@ pub async fn handle_search(
     after: Option<String>,
     before: Option<String>,
     level: Option<Vec<i32>>,
+    context_type: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
     ctx: CliContext,
 ) -> Result<()> {
     let mut params = vec![format!("--uri={}", uri), format!("-n {}", node_limit)];
@@ -1145,6 +1328,12 @@ pub async fn handle_search(
                 .join(",")
         ));
     }
+    if let Some(ref context_types) = context_type {
+        params.push(format!("--context-type {}", context_types.join(",")));
+    }
+    if let Some(ref t) = tags {
+        params.push(format!("--tags {}", t.join(",")));
+    }
     params.push(format!("\"{}\"", query));
     print_command_echo("ov search", &params.join(" "), ctx.config.echo_command);
     let client = ctx.get_client();
@@ -1159,6 +1348,8 @@ pub async fn handle_search(
         before.as_deref(),
         None,
         level,
+        context_type,
+        tags,
         ctx.output_format,
         ctx.compact,
     )
@@ -1274,9 +1465,24 @@ pub async fn handle_mkdir(uri: String, description: Option<String>, ctx: CliCont
     .await
 }
 
-pub async fn handle_rm(uri: String, recursive: bool, ctx: CliContext) -> Result<()> {
+pub async fn handle_rm(
+    uri: String,
+    recursive: bool,
+    wait: bool,
+    timeout: Option<f64>,
+    ctx: CliContext,
+) -> Result<()> {
     let client = ctx.get_client();
-    commands::filesystem::rm(&client, &uri, recursive, ctx.output_format, ctx.compact).await
+    commands::filesystem::rm(
+        &client,
+        &uri,
+        recursive,
+        wait,
+        timeout,
+        ctx.output_format,
+        ctx.compact,
+    )
+    .await
 }
 
 pub async fn handle_mv(from_uri: String, to_uri: String, ctx: CliContext) -> Result<()> {
@@ -1300,16 +1506,9 @@ pub async fn handle_grep(
 ) -> Result<()> {
     // Prevent grep from root directory to avoid excessive server load and timeouts
     if uri == "viking://" || uri == "viking:///" {
-        eprintln!(
-            "Error: Cannot grep from root directory 'viking://'.\n\
-             Grep from root would search across all scopes (resources, user, agent, session, queue, temp),\n\
-             which may cause server timeout or excessive load.\n\
-             Please specify a more specific scope, e.g.:\n\
-               ov grep --uri=viking://resources '{}'\n\
-               ov grep --uri=viking://user '{}'",
-            pattern, pattern
-        );
-        std::process::exit(1);
+        return Err(Error::Client(format!(
+            "Cannot grep from root directory 'viking://'. Use a more specific scope, for example `ov grep --uri=viking://resources {pattern}`."
+        )));
     }
 
     let mut params = vec![
@@ -1346,7 +1545,7 @@ pub async fn handle_glob(
     node_limit: i32,
     ctx: CliContext,
 ) -> Result<()> {
-    let params = vec![
+    let params = [
         format!("--uri={}", uri),
         format!("-n {}", node_limit),
         format!("\"{}\"", pattern),
@@ -1389,16 +1588,7 @@ pub async fn handle_tui(uri: String, ctx: CliContext) -> Result<()> {
                 println!("Warning: Server reports unhealthy status");
             }
         }
-        Err(e) => {
-            println!("Error: Failed to connect to server at {}", ctx.config.url);
-            println!("{}", e);
-            println!("\nPlease check:");
-            println!("  1. The server is running");
-            println!("  2. The URL is correct");
-            println!("  3. Your API key is valid (if required)");
-            println!("\nRun `ov config` to reconfigure if needed.");
-            std::process::exit(1);
-        }
+        Err(e) => return Err(e),
     }
 
     tui::run_tui(client, &uri).await
@@ -1416,6 +1606,26 @@ mod config_switch_prompt_tests {
 
         assert_eq!(rendered, "Choose config\r\n  › local\r\n");
         assert!(!rendered.contains("config\n"));
+    }
+
+    #[test]
+    fn switch_selector_counts_physical_rows_after_wrapping_and_ansi_styles() {
+        let lines = vec![
+            "\u{1b}[31m12345678901\u{1b}[0m".to_string(),
+            "short".to_string(),
+        ];
+
+        assert_eq!(rendered_select_rows(&lines, 10), 3);
+    }
+
+    #[test]
+    fn switch_selector_recomputes_clear_rows_after_resize() {
+        let lines = vec!["x".repeat(90)];
+        let region = RenderedSelectRegion::from_lines(&lines, 90);
+
+        assert_eq!(rendered_select_rows(&lines, 90), 1);
+        assert_eq!(rendered_select_rows(&lines, 30), 3);
+        assert_eq!(region.rows_to_clear(30), 3);
     }
 
     #[test]

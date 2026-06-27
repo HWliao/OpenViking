@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
-from openviking.message.part import ContextPart, Part, TextPart, ToolPart
+from openviking.core.peer_id import normalize_peer_id
+from openviking.message.part import ContextPart, ImagePart, Part, TextPart, ToolPart
 from openviking.utils.token_estimation import estimate_text_tokens
 
 
@@ -21,7 +22,7 @@ class Message:
     id: str
     role: Literal["user", "assistant"]
     parts: List[Part]
-    role_id: Optional[str] = None
+    peer_id: Optional[str] = None
     created_at: str = None
 
     @property
@@ -39,6 +40,8 @@ class Message:
         Counts fields that actually appear in the assembled prompt:
         - TextPart.text: always emitted
         - ContextPart.abstract: injected as text (uri is not sent to the model)
+        - ImagePart: not counted here; image captioning/model usage is tracked
+          by the VLM call that converts images into text for extraction
         - ToolPart: tool_id (appears in toolUse.id / toolResult.toolCallId),
           tool_name, tool_input (JSON), tool_output
 
@@ -72,13 +75,15 @@ class Message:
                 .isoformat(timespec="milliseconds")
                 .replace("+00:00", "Z")
             )
-        return {
+        data = {
             "id": self.id,
             "role": self.role,
-            "role_id": self.role_id,
             "parts": [self._part_to_dict(p) for p in self.parts],
             "created_at": created_at_val,
         }
+        if self.peer_id is not None:
+            data["peer_id"] = self.peer_id
+        return data
 
     def _part_to_dict(self, part: Part) -> dict:
         if isinstance(part, TextPart):
@@ -89,6 +94,14 @@ class Message:
                 "uri": part.uri,
                 "context_type": part.context_type,
                 "abstract": part.abstract,
+            }
+        elif isinstance(part, ImagePart):
+            image_url = {"url": part.url}
+            if part.detail is not None:
+                image_url["detail"] = part.detail
+            return {
+                "type": part.type,
+                "image_url": image_url,
             }
         elif isinstance(part, ToolPart):
             d = {
@@ -165,6 +178,18 @@ class Message:
                         abstract=p.get("abstract", ""),
                     )
                 )
+            elif p["type"] == "image_url":
+                image_url = p.get("image_url")
+                url = ""
+                detail = None
+                if isinstance(image_url, dict):
+                    url = str(image_url.get("url", "") or "")
+                    detail = image_url.get("detail")
+                elif isinstance(image_url, str):
+                    url = image_url
+                if not url.strip():
+                    raise ValueError("image_url part requires a non-empty URL")
+                parts.append(ImagePart(url=url, detail=detail))
             elif p["type"] == "tool":
                 parts.append(
                     ToolPart(
@@ -199,80 +224,18 @@ class Message:
                         tool_output_group_budget_chars=p.get("tool_output_group_budget_chars"),
                     )
                 )
+        try:
+            peer_id = normalize_peer_id(data.get("peer_id"))
+        except ValueError:
+            peer_id = data.get("peer_id")
+
         return cls(
             id=data["id"],
             role=data["role"],
             parts=parts,
-            role_id=data.get("role_id"),
+            peer_id=peer_id,
             created_at=data.get("created_at"),
         )
-
-    @classmethod
-    def create_user(
-        cls,
-        content: str,
-        msg_id: str = None,
-        role_id: Optional[str] = None,
-    ) -> "Message":
-        """Create user message."""
-        from uuid import uuid4
-
-        return cls(
-            id=msg_id or f"msg_{uuid4().hex}",
-            role="user",
-            parts=[TextPart(text=content)],
-            role_id=role_id,
-            created_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-    @classmethod
-    def create_assistant(
-        cls,
-        content: str = "",
-        context_refs: List[dict] = None,
-        tool_calls: List[dict] = None,
-        msg_id: str = None,
-        role_id: Optional[str] = None,
-    ) -> "Message":
-        """Create assistant message."""
-        from uuid import uuid4
-
-        parts: List[Part] = []
-        if content:
-            parts.append(TextPart(text=content))
-
-        for ref in context_refs or []:
-            parts.append(
-                ContextPart(
-                    uri=ref.get("uri", ""),
-                    context_type=ref.get("context_type", "memory"),
-                    abstract=ref.get("abstract", ""),
-                )
-            )
-
-        for tc in tool_calls or []:
-            parts.append(
-                ToolPart(
-                    tool_id=tc.get("id", ""),
-                    tool_name=tc.get("name", ""),
-                    tool_uri=tc.get("uri", ""),
-                    skill_uri=tc.get("skill_uri", ""),
-                    tool_input=tc.get("input"),
-                    tool_status=tc.get("status", "pending"),
-                )
-            )
-
-        return cls(
-            id=msg_id or f"msg_{uuid4().hex}",
-            role="assistant",
-            parts=parts,
-            role_id=role_id,
-            created_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-    def get_context_parts(self) -> List[ContextPart]:
-        """Get all ContextParts."""
-        return [p for p in self.parts if isinstance(p, ContextPart)]
 
     def get_tool_parts(self) -> List[ToolPart]:
         """Get all ToolParts."""
