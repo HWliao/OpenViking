@@ -372,6 +372,11 @@ def _start_vikingbot_gateway(
     try:
         # Set environment to ensure it uses the same Python environment
         env = os.environ.copy()
+        # Rich may emit non-ASCII status symbols while stdout/stderr are
+        # redirected to logs. Force UTF-8 so Windows GBK consoles do not crash
+        # the gateway subprocess during startup.
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
         cli_config_path = _resolve_cli_config_for_bot(config_path)
         if cli_config_path is not None:
             env[OPENVIKING_CLI_CONFIG_ENV] = cli_config_path
