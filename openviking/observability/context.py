@@ -27,6 +27,12 @@ from typing import Any, Dict, Optional
 
 from openviking.telemetry.span_models import OperationSpanAttributes, RootSpanAttributes
 
+
+def _get_logger():
+    from openviking_cli.utils import get_logger
+
+    return get_logger(__name__)
+
 # Try to import opentelemetry
 try:
     from opentelemetry import trace as otel_trace

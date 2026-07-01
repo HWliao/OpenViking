@@ -26,7 +26,7 @@ from openviking_cli.utils.config.consts import (
     DEFAULT_OVCLI_CONF,
     OPENVIKING_CLI_CONFIG_ENV,
 )
-from openviking_cli.utils.logger import configure_uvicorn_logging
+from openviking_cli.utils.logger import configure_server_logging, get_logger
 
 
 @dataclass
@@ -63,12 +63,11 @@ def _abort_if_port_in_use(port: int, label: str) -> None:
         except (ConnectionRefusedError, socket.timeout, OSError):
             in_use = False
     if in_use:
-        print(
+        get_logger(__name__).error(
             f"Error: {label} port {port} is already in use.\n"
-            f"  A previous process is still bound — refusing to start a duplicate.\n"
+            f"  A previous process is still bound - refusing to start a duplicate.\n"
             f"  Identify it:  lsof -nP -iTCP:{port} -sTCP:LISTEN\n"
-            f"  Kill it, then retry.",
-            file=sys.stderr,
+            f"  Kill it, then retry."
         )
         sys.exit(1)
 
@@ -213,6 +212,10 @@ def main():
         print(e, file=sys.stderr)
         sys.exit(1)
 
+    # Configure logging before any optional startup probes emit status lines.
+    configure_server_logging()
+    logger = get_logger(__name__)
+
     # Ensure Ollama is running if configured
     try:
         from openviking_cli.utils.ollama import detect_ollama_in_config, ensure_ollama_for_server
@@ -222,17 +225,18 @@ def main():
         if uses_ollama:
             result = ensure_ollama_for_server(ollama_host, ollama_port)
             if result.success:
-                print(f"Ollama is running at {ollama_host}:{ollama_port}")
+                logger.info("Ollama is running at %s:%s", ollama_host, ollama_port)
             else:
-                print(
-                    f"Warning: Ollama not available at {ollama_host}:{ollama_port}. "
-                    f"Embedding/VLM may fail. ({result.message})",
-                    file=sys.stderr,
+                logger.warning(
+                    "Ollama not available at %s:%s. Embedding/VLM may fail. (%s)",
+                    ollama_host,
+                    ollama_port,
+                    result.message,
                 )
                 if result.stderr_output:
-                    print(f"  Ollama stderr: {result.stderr_output}", file=sys.stderr)
+                    logger.warning("Ollama stderr: %s", result.stderr_output)
     except Exception as e:
-        print(f"Warning: Ollama pre-flight check failed: {e}", file=sys.stderr)
+        logger.warning("Ollama pre-flight check failed: %s", e)
 
     # Override with command line arguments
     if args.host is not None:
@@ -244,15 +248,12 @@ def main():
     if args.with_bot:
         config.with_bot = True
 
-    # Configure logging for Uvicorn
-    configure_uvicorn_logging()
-
     bot_process: Optional[BotProcess] = None
     if config.with_bot:
         bot_port = args.bot_port
         config.bot_api_url = f"http://{VIKINGBOT_DEFAULT_HOST}:{bot_port}"
         _abort_if_port_in_use(bot_port, "vikingbot gateway")
-        print(f"Bot API proxy enabled, forwarding to {config.bot_api_url}")
+        logger.info("Bot API proxy enabled, forwarding to %s", config.bot_api_url)
         # Determine if bot logging should be enabled
         enable_bot_logging = args.enable_bot_logging
         if enable_bot_logging is None:
@@ -269,7 +270,12 @@ def main():
     # Create and run server app
     app = create_app(config)
     workers_info = f" (workers: {config.workers})" if config.workers > 1 else ""
-    print(f"OpenViking HTTP Server is running on {config.host}:{config.port}{workers_info}")
+    logger.info(
+        "OpenViking HTTP Server is running on %s:%s%s",
+        config.host,
+        config.port,
+        workers_info,
+    )
 
     try:
         workers = config.workers
@@ -296,21 +302,18 @@ def main():
 
 def _handle_vikingbot_failure(output: str, returncode: int) -> None:
     """Handle vikingbot startup failure and provide helpful error messages."""
-    print(f"\nError: vikingbot gateway exited early (code {returncode})", file=sys.stderr)
+    logger = get_logger(__name__)
+    logger.error("vikingbot gateway exited early (code %s)", returncode)
 
     # Check for common dependency errors
     if "ModuleNotFoundError" in output:
-        print("\nMissing dependencies detected!", file=sys.stderr)
-        print(
-            "\nTo use --with-bot, you need to install openviking with bot dependencies:",
-            file=sys.stderr,
+        logger.error(
+            "Missing dependencies detected. To use --with-bot, install openviking "
+            "with bot dependencies: uv pip install -e \".[bot,dev]\""
         )
-        print('  pip install "openviking[bot]"', file=sys.stderr)
-        print("  # Or for development:", file=sys.stderr)
-        print('  uv pip install -e ".[bot,dev]"', file=sys.stderr)
 
     if output:
-        print(f"\nDetailed error:\n{output}", file=sys.stderr)
+        logger.error("Detailed vikingbot error:\n%s", output)
 
 
 def _start_vikingbot_gateway(
@@ -320,7 +323,8 @@ def _start_vikingbot_gateway(
     config_path: Optional[str] = None,
 ) -> Optional[BotProcess]:
     """Start vikingbot gateway as a subprocess."""
-    print("Starting vikingbot gateway...")
+    logger = get_logger(__name__)
+    logger.info("Starting vikingbot gateway")
 
     # Check if vikingbot is available
     vikingbot_cmd = None
@@ -339,8 +343,7 @@ def _start_vikingbot_gateway(
             pass
 
     if vikingbot_cmd is None:
-        print("Warning: vikingbot not found. Please install vikingbot first.")
-        print("  uv pip install -e '.[bot,dev]'")
+        logger.warning("vikingbot not found. Install it with: uv pip install -e '.[bot,dev]'")
         return None
 
     vikingbot_cmd.extend(["--host", VIKINGBOT_DEFAULT_HOST, "--port", str(port)])
@@ -359,9 +362,9 @@ def _start_vikingbot_gateway(
             log_file = open(log_file_path, "a")
             stdout_handler = log_file
             stderr_handler = log_file
-            print(f"Vikingbot logs will be written to: {log_file_path}")
+            logger.info("Vikingbot logs will be written to: %s", log_file_path)
         except Exception as e:
-            print(f"Warning: Failed to setup bot logging: {e}")
+            logger.warning("Failed to setup bot logging: %s", e)
             if log_file:
                 log_file.close()
                 log_file = None
@@ -404,14 +407,14 @@ def _start_vikingbot_gateway(
                 _handle_vikingbot_failure(stderr, process.returncode)
             sys.exit(1)
 
-        print(f"Vikingbot gateway started (PID: {process.pid})")
+        logger.info("Vikingbot gateway started (PID: %s)", process.pid)
 
         return BotProcess(process=process, log_file=log_file)
 
     except Exception as e:
         if log_file:
             log_file.close()
-        print(f"Warning: Failed to start vikingbot gateway: {e}")
+        logger.warning("Failed to start vikingbot gateway: %s", e)
         return None
 
 
@@ -420,28 +423,29 @@ def _stop_vikingbot_gateway(bot_process: BotProcess) -> None:
     if bot_process is None:
         return
 
-    print(f"\nStopping vikingbot gateway (PID: {bot_process.process.pid})...")
+    logger = get_logger(__name__)
+    logger.info("Stopping vikingbot gateway (PID: %s)", bot_process.process.pid)
 
     try:
         # Try graceful termination first
         bot_process.process.terminate()
         try:
             bot_process.process.wait(timeout=5)
-            print("Vikingbot gateway stopped gracefully.")
+            logger.info("Vikingbot gateway stopped gracefully")
         except subprocess.TimeoutExpired:
             # Force kill if it doesn't stop in time
             bot_process.process.kill()
             bot_process.process.wait()
-            print("Vikingbot gateway force killed.")
+            logger.warning("Vikingbot gateway force killed")
     except Exception as e:
-        print(f"Error stopping vikingbot gateway: {e}")
+        logger.error("Error stopping vikingbot gateway: %s", e)
     finally:
         # Close the log file if it exists
         if bot_process.log_file is not None:
             try:
                 bot_process.log_file.close()
             except Exception as e:
-                print(f"Error closing bot log file: {e}")
+                logger.error("Error closing bot log file: %s", e)
 
 
 if __name__ == "__main__":

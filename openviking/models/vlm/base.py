@@ -392,7 +392,7 @@ class FailoverVLM(VLMBase):
 
         self.primary = primary
         self.backup = backup
-        self._logger = logging.getLogger(__name__)
+        self._logger = logger
         self._switcher = PrimaryBackupSwitcher(
             failback_timeout_seconds=failback_timeout_seconds,
             failback_request_count=failback_request_count,
@@ -644,7 +644,7 @@ class MultiCredentialVLM(VLMBase):
 
         self._vlm_instances = vlm_instances
         self._credential_ids = credential_ids
-        self._logger = logging.getLogger(__name__)
+        self._logger = logger
         self._switcher = OrderedCredentialSwitcher(
             n=len(vlm_instances),
             failback_timeout_seconds=failback_timeout_seconds,

@@ -8,8 +8,6 @@ import json
 import logging
 from typing import Any, Callable, Optional
 
-from loguru import logger
-
 # Try to import opentelemetry - will be None if not installed
 try:
     from opentelemetry import trace as otel_trace
@@ -54,8 +52,14 @@ _propagator: Any = None
 _trace_id_filter_added: bool = False
 
 
+def _get_logger() -> logging.Logger:
+    from openviking_cli.utils.logger import get_logger
+
+    return get_logger(__name__)
+
+
 def _log_trace_internal_failure(message: str) -> None:
-    logger.debug(message, exc_info=True)
+    _get_logger().debug(message, exc_info=True)
 
 
 class TraceIdLoggingFilter(logging.Filter):
@@ -77,24 +81,11 @@ def _setup_logging():
         return
 
     try:
-        # Configure logger to patch records with trace_id
-        def _patch_trace_id(record):
-            trace_id = get_trace_id()
-            record["extra"]["trace_id"] = trace_id
-            if trace_id:
-                record["message"] = f"[{trace_id}] {record['message']}"
-
-        logger.configure(patcher=_patch_trace_id)
-        _trace_id_filter_added = True
-    except Exception:
-        _log_trace_internal_failure("[TRACER] failed to configure loguru trace_id patcher")
-
-    # Also setup standard logging filter
-    try:
         standard_logger = logging.getLogger()
         for handler in standard_logger.handlers:
             if not any(isinstance(f, TraceIdLoggingFilter) for f in handler.filters):
                 handler.addFilter(TraceIdLoggingFilter())
+        _trace_id_filter_added = True
     except Exception:
         _log_trace_internal_failure("[TRACER] failed to attach standard logging trace_id filter")
 
@@ -108,11 +99,11 @@ def init_tracer_from_config() -> Any:
         tracer_cfg = config.telemetry.tracer
 
         if not tracer_cfg.enabled:
-            logger.info("[TRACER] disabled in config")
+            _get_logger().info("[TRACER] disabled in config")
             return None
 
         if not tracer_cfg.endpoint:
-            logger.warning("[TRACER] endpoint not configured")
+            _get_logger().warning("[TRACER] endpoint not configured")
             return None
 
         headers = {
@@ -130,7 +121,7 @@ def init_tracer_from_config() -> Any:
             enabled=tracer_cfg.enabled,
         )
     except Exception as e:
-        logger.warning(f"[TRACER] init from config failed: {e}")
+        _get_logger().warning(f"[TRACER] init from config failed: {e}")
         return None
 
 
@@ -146,11 +137,11 @@ def init_tracer_from_server_config(server_config: Any) -> Any:
     try:
         trace_cfg = server_config.observability.traces
         if not trace_cfg.enabled:
-            logger.info("[TRACER] disabled in server.observability.traces")
+            _get_logger().info("[TRACER] disabled in server.observability.traces")
             return None
 
         if not trace_cfg.endpoint:
-            logger.warning("[TRACER] server.observability.traces.endpoint not configured")
+            _get_logger().warning("[TRACER] server.observability.traces.endpoint not configured")
             return None
 
         return init_tracer(
@@ -162,7 +153,7 @@ def init_tracer_from_server_config(server_config: Any) -> Any:
             enabled=trace_cfg.enabled,
         )
     except Exception as e:
-        logger.warning(f"[TRACER] init from server config failed: {e}")
+        _get_logger().warning(f"[TRACER] init from server config failed: {e}")
         return None
 
 
@@ -172,11 +163,11 @@ def _init_asyncio_instrumentation() -> None:
         from opentelemetry.instrumentation.asyncio import AsyncioInstrumentor
 
         AsyncioInstrumentor().instrument()
-        logger.debug("[TRACER] initialized AsyncioInstrumentor")
+        _get_logger().debug("[TRACER] initialized AsyncioInstrumentor")
     except ImportError:
-        logger.warning("[TRACER] opentelemetry-instrumentation-asyncio not installed")
+        _get_logger().warning("[TRACER] opentelemetry-instrumentation-asyncio not installed")
     except Exception as e:
-        logger.warning(f"[TRACER] failed to init AsyncioInstrumentor: {e}")
+        _get_logger().warning(f"[TRACER] failed to init AsyncioInstrumentor: {e}")
 
 
 def init_tracer(
@@ -203,11 +194,11 @@ def init_tracer(
     global _otel_tracer, _propagator
 
     if not enabled:
-        logger.info("[TRACER] disabled by config")
+        _get_logger().info("[TRACER] disabled by config")
         return None
 
     if otel_trace is None or TracerProvider is None or Resource is None:
-        logger.warning(
+        _get_logger().warning(
             "OpenTelemetry not installed. Install with: uv pip install opentelemetry-api "
             "opentelemetry-sdk opentelemetry-exporter-otlpprotogrpc"
         )
@@ -269,7 +260,7 @@ def init_tracer(
         # Initialize asyncio instrumentation to create child spans for create_task
         _init_asyncio_instrumentation()
 
-        logger.debug(
+        _get_logger().debug(
             "[TRACER] initialized with service_name=%s, protocol=%s, endpoint=%s",
             service_name,
             protocol,
@@ -278,7 +269,7 @@ def init_tracer(
         return _otel_tracer
 
     except Exception as e:
-        logger.warning(f"[TRACER] initialized failed: {type(e).__name__}: {e}")
+        _get_logger().warning(f"[TRACER] initialized failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -342,7 +333,7 @@ def from_trace_info(trace_info: str) -> Optional[Any]:
         context = extract(carrier)
         return context
     except Exception as e:
-        logger.debug(f"[TRACER] failed to extract trace context: {e}")
+        _get_logger().debug(f"[TRACER] failed to extract trace context: {e}")
         return None
 
 
@@ -506,7 +497,7 @@ class tracer:
 
             return _otel_tracer.start_as_current_span(name=name, context=input_context)
         except Exception as e:
-            logger.debug(f"[TRACER] failed to start span: {e}")
+            _get_logger().debug(f"[TRACER] failed to start span: {e}")
             return _DummySpanContext()
 
     @staticmethod
@@ -549,7 +540,7 @@ class tracer:
     def info(line: str, console: bool = False) -> None:
         """Add an event to the current span."""
         if console:
-            logger.opt(depth=1).info(line)
+            _get_logger().info(line, stacklevel=2)
         if _otel_tracer is None:
             return
 
@@ -569,7 +560,7 @@ class tracer:
     def info_span(line: str, console: bool = False) -> None:
         """Create a new span with the given name."""
         if console:
-            logger.opt(depth=1).info(line)
+            _get_logger().info(line, stacklevel=2)
         if _otel_tracer is None:
             return
         with tracer.start_as_current_span(name=line):
@@ -580,9 +571,9 @@ class tracer:
         """Record an error on the current span."""
         if console:
             if e is not None:
-                logger.opt(depth=1).exception(f"{line}", exc_info=e)
+                _get_logger().error(line, exc_info=(type(e), e, e.__traceback__))
             else:
-                logger.opt(depth=1).error(line)
+                _get_logger().error(line, stacklevel=2)
         if _otel_tracer is None:
             return
 

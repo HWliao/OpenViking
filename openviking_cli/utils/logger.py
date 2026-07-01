@@ -9,6 +9,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from logging.handlers import QueueHandler, QueueListener, TimedRotatingFileHandler
 from pathlib import Path
@@ -435,6 +436,8 @@ class TraceContextFilter(logging.Filter):
         record.span_id = context.get("span_id", "")
         record.request_id = context.get("request_id", "")
         record.operation = context.get("operation", "")
+        record.telemetry_id = context.get("telemetry_id", "")
+        record.status = context.get("status", "")
         record.account_id = context.get("account_id", "")
         record.user_id = context.get("user_id", "")
 
@@ -697,6 +700,24 @@ def _add_trace_id_filter(handler: logging.Handler) -> None:
         handler.addFilter(TraceIdLoggingFilter())
 
 
+class _WindowsSafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Timed rotation that does not spam stderr when Windows locks the log."""
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 32:
+                raise
+            if self.stream is None:
+                self.stream = self._open()
+            current_time = int(time.time())
+            new_rollover_at = self.computeRollover(current_time)
+            while new_rollover_at <= current_time:
+                new_rollover_at += self.interval
+            self.rolloverAt = new_rollover_at
+
+
 def _create_log_handler(log_output: str, config: Optional[Any]) -> logging.Handler:
     # Prevent creating a file literally named "file"
     if log_output == "file":
@@ -719,7 +740,7 @@ def _create_log_handler(log_output: str, config: Optional[Any]) -> logging.Handl
                         when = log_rotation_interval
                         interval = 1
 
-                    return TimedRotatingFileHandler(
+                    return _WindowsSafeTimedRotatingFileHandler(
                         log_output,
                         when=when,
                         interval=interval,
@@ -807,6 +828,18 @@ def _configure_logger_instance(
             old_handler.close()
         except Exception:
             pass
+
+
+def _configure_uvicorn_logger_instances(level: int, handler: logging.Handler) -> None:
+    uvicorn_logger_names = ["uvicorn", "uvicorn.error", "uvicorn.access"]
+    for logger_name in uvicorn_logger_names:
+        logger = logging.getLogger(logger_name)
+        _configure_logger_instance(
+            logger,
+            level=level,
+            handler=handler if logger_name == "uvicorn" else None,
+            propagate=logger_name != "uvicorn",
+        )
 
 
 def get_logger(
@@ -907,13 +940,23 @@ def configure_uvicorn_logging() -> None:
     level = getattr(logging, log_level_str, logging.INFO)
     handler = _get_shared_handler(log_output, config, log_format)
 
-    # Configure all Uvicorn loggers
-    uvicorn_logger_names = ["uvicorn", "uvicorn.error", "uvicorn.access"]
-    for logger_name in uvicorn_logger_names:
-        logger = logging.getLogger(logger_name)
-        _configure_logger_instance(
-            logger,
-            level=level,
-            handler=handler if logger_name == "uvicorn" else None,
-            propagate=logger_name != "uvicorn",
-        )
+    _configure_uvicorn_logger_instances(level, handler)
+
+
+def configure_server_logging() -> None:
+    """Configure server, uvicorn, and third-party logs for the server process."""
+    reconfigure_logging()
+    log_level_str, log_format, log_output, config = _load_log_config()
+    level = getattr(logging, log_level_str, logging.INFO)
+    handler = _get_shared_handler(log_output, config, log_format)
+
+    # Third-party server dependencies (asyncio, APScheduler, MCP, etc.) log to
+    # the root logger. Route them to the same rotating server log instead of
+    # letting them fall back to stderr.
+    _configure_logger_instance(
+        logging.getLogger(),
+        level=level,
+        handler=handler,
+        propagate=False,
+    )
+    _configure_uvicorn_logger_instances(level, handler)
