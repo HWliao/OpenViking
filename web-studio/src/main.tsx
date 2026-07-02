@@ -14,8 +14,9 @@ import { getRouterBasePath } from './lib/public-path'
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
   const basePath = getRouterBasePath() || '/'
   const swUrl = `${basePath}${basePath.endsWith('/') ? '' : '/'}service-worker.js`
+  const swScope = basePath.endsWith('/') ? basePath : `${basePath}/`
   window.addEventListener('load', () => {
-    void navigator.serviceWorker.register(swUrl, { scope: basePath })
+    void navigator.serviceWorker.register(swUrl, { scope: swScope })
   })
 }
 

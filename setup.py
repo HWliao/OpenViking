@@ -463,7 +463,7 @@ class OpenVikingBuildExt(build_ext):
 def _build_web_studio():
     """Build the web-studio SPA and copy dist into the Python package tree.
 
-    Skipped when OV_SKIP_STUDIO_BUILD=1 or when the bundle already exists.
+    Skipped when OV_SKIP_STUDIO_BUILD=1.
     Falls back gracefully (warning, not error) when npm is unavailable.
     """
     if os.environ.get("OV_SKIP_STUDIO_BUILD") == "1":
@@ -471,18 +471,20 @@ def _build_web_studio():
         return
 
     dest = SETUP_DIR / "openviking" / "web_studio" / "dist"
-    if (dest / "index.html").is_file():
-        print("  [OK] web-studio bundle already present")
-        return
-
     source = SETUP_DIR / "web-studio"
     if not (source / "package.json").is_file():
-        print("  [SKIP] web-studio source not found; /studio will be unavailable")
+        if (dest / "index.html").is_file():
+            print("  [OK] web-studio bundle already present")
+        else:
+            print("  [SKIP] web-studio source not found; /studio will be unavailable")
         return
 
     npm = shutil.which("npm")
     if not npm:
-        print("  [SKIP] npm not found; install Node.js to enable /studio")
+        if (dest / "index.html").is_file():
+            print("  [OK] web-studio bundle already present; npm not found, skipping rebuild")
+        else:
+            print("  [SKIP] npm not found; install Node.js to enable /studio")
         return
 
     print("Building web-studio (Vite SPA)...")
