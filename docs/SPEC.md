@@ -1,352 +1,213 @@
-# Spec: OpenCode Plugin peerId Session State
+# Spec: OpenCode Plugin Peer Project Identity Follow-Up
 
 ## Objective
 
-Build the next OpenViking OpenCode plugin runtime behavior inside `examples/opencode-plugin` only.
+Implement only the follow-up items listed under the `## 下一步待改动点` sections in `docs/issues/opencode-plugin-peer-id-migration-issue.md`.
 
-The plugin should stop using runtime `agentId` semantics, resolve and propagate `peerId`, persist local project/session state without a single global map file, finalize expired session state by pushing staged messages and triggering server commit, and rotate the plugin log on startup.
+The change targets `examples/opencode-plugin` and closes the remaining gaps after the initial peer session state migration:
 
-This spec intentionally excludes server/storage migration of old `viking://agent/...` data. That legacy data migration is not part of this change.
+- `projectID=global` must not become the persisted project identity.
+- Auto `peerId` generation must support short but valid non-global project ids.
+- Existing OpenCode sessions that missed `session.created` must lazily initialize local session state.
+- OpenCode SDK calls used for session/project lookup must use the v2 client surface where available.
+- Session mapping JSON files under `openviking-sessions/sessions/` currently contain unexpected `peerId: null` values because `projectID=global` is treated as the effective project identity and skips auto peer derivation; the fix must prevent resolvable sessions from reaching that null-peer path.
+- `openviking-memory.log` must rotate at most once per day, not on every plugin startup.
 
-Detailed design decisions already captured in:
-
-`docs/issues/opencode-plugin-peer-id-migration-issue.md`
+The user is the OpenCode plugin runtime: automatic recall, memory tools, session message capture, and commit/finalization paths must continue to route OpenViking requests through a stable project-scoped peer id.
 
 ## Tech Stack
 
-Language: JavaScript ESM on Node.js.
-
-Package: `examples/opencode-plugin`.
-
-Runtime integration: `@opencode-ai/plugin`.
-
-State storage: local JSON files under the plugin runtime data directory.
-
-No new dependency should be added for this scope.
+- Runtime: Node.js ESM modules.
+- Test framework: built-in `node:test` with `node:assert/strict`.
+- Package: `examples/opencode-plugin`, currently published as `@openviking/opencode-plugin`.
+- OpenCode dependency: `@opencode-ai/plugin`; upgrade only as needed to access and test the v2 API surface.
+- State storage: JSON files under `<runtimeDataDir>/openviking-sessions/`.
 
 ## Commands
 
-Working directory for all commands:
-
-`examples/opencode-plugin`
-
-Focused log rotation test:
-
-```powershell
-node --check lib/utils.mjs && node --check tests/utils-log-rotation.test.mjs && node --test tests/utils-log-rotation.test.mjs
-```
-
-Windows-safe full syntax and test command:
-
-```powershell
-node --check index.mjs && node --check lib/runtime.mjs && node --check lib/repo-context.mjs && node --check lib/memory-session.mjs && node --check lib/memadd-local.mjs && node --check lib/memory-tools.mjs && node --check lib/code-tools.mjs && node --check lib/memory-recall.mjs && node --check lib/viking-uri-guard.mjs && node --check lib/utils.mjs && node --check tests/code-tools-request-options.test.mjs && node --check tests/memory-tools-write.test.mjs && node --check tests/utils-log-rotation.test.mjs && node --check tests/viking-uri-guard.test.mjs && node --test tests/code-tools-request-options.test.mjs tests/memory-tools-write.test.mjs tests/utils-log-rotation.test.mjs tests/viking-uri-guard.test.mjs
-```
-
-Package scripts:
+Run these commands from `D:\develop\source-workspace\OpenViking\examples\opencode-plugin`:
 
 ```powershell
 npm run check
 npm test
 ```
 
-`npm run check` is in scope for this change. Replace the shell glob with a Windows-safe `scripts/check.mjs` runner that enumerates the fixed source files and `tests/*.test.mjs` itself.
+Repository-level sanity checks before committing:
+
+```powershell
+git status --short
+git diff --check
+```
 
 ## Project Structure
 
-Plugin entrypoint:
-
-`examples/opencode-plugin/index.mjs`
-
-Runtime/config/log/request helpers:
-
-`examples/opencode-plugin/lib/utils.mjs`
-
-Session capture, staging, commit, and local state:
-
-`examples/opencode-plugin/lib/memory-session.mjs`
-
-Memory tools and peer propagation:
-
-`examples/opencode-plugin/lib/memory-tools.mjs`
-
-Code tools and peer propagation:
-
-`examples/opencode-plugin/lib/code-tools.mjs`
-
-Recall behavior:
-
-`examples/opencode-plugin/lib/memory-recall.mjs`
-
-Tests:
-
-`examples/opencode-plugin/tests/*.test.mjs`
-
-Check script:
-
-`examples/opencode-plugin/scripts/check.mjs`
-
-Spec:
-
-`docs/SPEC.md`
-
-## Code Style
-
-Keep the plugin direct and dependency-free. Prefer small local helpers over new classes unless state boundaries require it.
-
-Use synchronous filesystem operations only in startup-only paths where simple failure handling is more valuable than extra async plumbing. Use async filesystem operations for runtime state operations that may happen during event handling.
-
-Example style:
-
-```javascript
-function normalizeIdentifierPart(value) {
-  return String(value ?? "")
-    .replace(/[^A-Za-z0-9_-]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "")
-}
-```
-
-Logging must be best effort. Log failures should not break OpenCode plugin startup or event handling.
-
-## Requirements
-
-Use `peerId` as the runtime identity.
-
-Remove `agentId` and `agentIdMode` from config defaults, env handling, and runtime branches. Runtime requests must use `peerId`, `peerIdMode`, `peer_id`, and `X-OpenViking-Actor-Peer`.
-
-`peerIdMode` defaults to `auto`. Invalid `peerIdMode` values warn and fall back to `auto`.
-
-New env precedence is:
+Relevant implementation files:
 
 ```text
-OPENVIKING_PEER_ID > config.peerId
-OPENVIKING_PEER_ID_MODE > config.peerIdMode
+examples/opencode-plugin/index.mjs
+  Plugin entrypoint and OpenCode event/tool integration.
+
+examples/opencode-plugin/lib/memory-session.mjs
+  OpenCode session to OpenViking session state, peer routing, message staging, flush, commit, and finalization.
+
+examples/opencode-plugin/lib/utils.mjs
+  Config parsing, peer id validation, identifier normalization, auto peer id derivation, and logging helpers.
+
+examples/opencode-plugin/lib/memory-tools.mjs
+  Memory tool request paths that must propagate the resolved peer actor.
+
+examples/opencode-plugin/tests/*.test.mjs
+  Focused node:test coverage for config, peer identifiers, session state, finalization, memory tools, and request headers.
+
+docs/issues/opencode-plugin-peer-id-migration-issue.md
+  Source of truth for this spec only in its `## 下一步待改动点` sections; earlier sections are background constraints, not new implementation scope.
 ```
 
-Do not read `OPENVIKING_AGENT_ID` or `OPENVIKING_AGENT_ID_MODE`. Do not treat old `agentId` as a `peerId` fallback.
-
-Runtime requests must only send `X-OpenViking-Actor-Peer`; never send `X-OpenViking-Agent`.
-
-Session message bodies must use `peer_id`, matching the resolved peer sent in the request header.
-
-Auto peer id derivation uses:
-
-```text
-peerId = <slug>_<short_project_id>
-```
-
-`slug` comes from `basename(project.worktree)`, falling back to `basename(session.directory)`.
-
-`project.name` must not be used.
-
-`short_project_id` is the first 12 characters of the normalized `projectID`. If normalized `projectID` has fewer than 8 characters, auto derivation fails.
-
-In `peerIdMode=auto`, first reuse a valid `peerId` already stored in `projects/<safe_project_id>.json`. Do not re-derive when that cached project peer is valid.
-
-If the cached project peer is invalid, warn, discard it, store the invalid value in `previousPeerIds`, and re-derive.
-
-If auto derivation fails, fallback order is: existing session state peer, explicit `peerId`, then no actor peer. When explicit `peerId` is used only as an auto fallback, write it to session state only, not to the project file.
-
-If SDK session/project lookup fails, warn every time; do not add throttling.
-
-In `peerIdMode=fixed`, use only the explicit `peerId`. If it is missing or invalid, warn, keep plugin startup non-fatal, and disable peer propagation. Do not fallback to auto.
-
-Identifier normalization replaces non `A-Z a-z 0-9 _ -` characters with `_`, collapses repeated `_`, and trims leading/trailing `_`.
-
-`peerId` max length is 128.
-
-`ovSessionId` max length is 512 and uses:
-
-```text
-<safe_peer_id>_<safe_oc_session_id>
-```
-
-If no valid peer exists, `ovSessionId` falls back to:
-
-```text
-opencode_<safe_oc_session_id>
-```
-
-The local state root is:
-
-```text
-<runtimeDataDir>/openviking-sessions/
-```
-
-Directory layout:
+State layout remains:
 
 ```text
 openviking-sessions/
   meta.json
-  projects/
-    <safe_project_id>.json
-  sessions/
-    <safe_oc_session_id>.json
-  finalizing/
-    <safe_oc_session_id>.<pid>.<timestamp>.json
-  abandoned/
-    <safe_oc_session_id>.<timestamp>.json
+  projects/<safe_project_id>.json
+  sessions/<safe_oc_session_id>.json
+  finalizing/<safe_oc_session_id>.<pid>.<timestamp>.json
+  abandoned/<name>.<timestamp>.json
 ```
 
-Project files store stable project-to-peer state. Session files store routing, message staging, and commit recovery state.
+## Code Style
 
-`meta.json` is only for low-frequency schema/migration information. Do not store dynamic counters, `lastSaved`, or cleanup timestamps there. Missing or failed `meta.json` creation warns but does not block plugin startup.
+Prefer small, direct ESM functions. Keep defensive SDK checks close to the call site and return structured failure details instead of throwing through event handlers.
 
-If `openviking-sessions/` directory initialization fails, disable local persistent state and continue with in-memory state. Print this degradation warning once because pending messages and routing state will be lost on process exit.
+Example style:
 
-Project file rules:
-
-- Path: `projects/<safe_project_id>.json`.
-- `safe_project_id = normalize(projectID)`.
-- Different project IDs that normalize to the same `safe_project_id` are treated as the same project identity.
-- If `safe_project_id` has fewer than 8 characters, do not write a project file and do not generate an auto peer id.
-- Initial project file creation uses no-overwrite write, for example `fs.promises.writeFile(path, json, { flag: "wx" })`.
-- If initial creation hits `EEXIST`, read the existing project file and reuse an existing valid `peerId`.
-- Before writing, do a lightweight read-before-write; if an existing valid `peerId` is present, use it and skip this write.
-- Updates to existing project files use temp file plus rename.
-- Bad project JSON moves to `abandoned/project-<safe_project_id>.<timestamp>.json`, then the project state is regenerated.
-- TTL does not clean project files.
-
-Session file rules:
-
-- Path: `sessions/<safe_oc_session_id>.json`.
-- `safe_oc_session_id = normalize(openCodeSessionId)`.
-- Do not hash `safe_oc_session_id`; keep it readable.
-- Different OpenCode session IDs that normalize to the same `safe_oc_session_id` are treated as the same session.
-- If normalization is empty, use `unknown_session_<timestamp>`.
-- Bad session JSON moves to `abandoned/<safe_oc_session_id>.<timestamp>.json`, then a fresh session state is created. Do not try to recover pending messages from bad JSON.
-- Initial session file creation does not require `wx`; write the current in-memory state for the same process.
-- Session file writes use temp file plus rename.
-- Session state writes do not attempt complex cross-process merge. Normal operation should not have multiple processes handling the same session.
-- Do not persist `sendingMessages`; it is process-local anti-reentry state only.
-- Persist `pendingMessages` and `messageRoles` as array pairs.
-- Persist `capturedMessages` as message id arrays only.
-- Persist `commit.inFlight`, `commit.taskId`, `commit.startedAt`, `commit.pendingCleanup`, and `commit.lastCommitTime` as recovery hints only. They must not permanently block future flush/commit attempts.
-- `commit.pendingCleanup` means the session was deleted or errored and local state should be removed after required flush/commit completes.
-
-Session state shape:
-
-```json
-{
-  "version": 1,
-  "openCodeSessionId": "ses_xxx",
-  "safeOpenCodeSessionId": "ses_xxx",
-  "projectID": "project_xxx",
-  "safeProjectId": "project_xxx",
-  "peerId": "OpenViking_project_xxx",
-  "ovSessionId": "OpenViking_project_xxx_ses_xxx",
-  "createdAt": 1783000000000,
-  "updatedAt": 1783000000000,
-  "lastSeenAt": 1783000000000,
-  "expiresAt": 1783086400000,
-  "capturedMessages": [],
-  "messageRoles": [],
-  "pendingMessages": [],
-  "commit": {
-    "lastCommitTime": null,
-    "inFlight": false,
-    "taskId": null,
-    "startedAt": null,
-    "pendingCleanup": false
+```javascript
+async function getOpenCodeSessionV2(client, sessionID, context = {}) {
+  const sessionApi = client?.session
+  if (!sessionApi || typeof sessionApi.get !== "function") {
+    return { session: null, warning: "OpenCode v2 session API is unavailable" }
   }
+
+  const request = { sessionID }
+  if (context.directory) request.directory = context.directory
+  if (context.workspace) request.workspace = context.workspace
+
+  return { session: await sessionApi.get(request), warning: null }
 }
 ```
 
-Do not keep using `openviking-session-map.json` as active state. If the old file exists, try to rename it to `openviking-session-map.v1-backup-YYYYMMDD-HHMMSS.json`; if that fails, warn and continue with `openviking-sessions/`.
+Conventions:
 
-Do not migrate old `openviking-session-map.json` contents. If the old file still exists, attempt this backup on every startup. Do not submit old pending messages; warning is enough.
+- Keep identifier normalization centralized in `lib/utils.mjs`.
+- Do not introduce compatibility branches for `agentId`, `agentIdMode`, `OPENVIKING_AGENT_ID`, or `OPENVIKING_AGENT_ID_MODE`.
+- Treat warnings as operational diagnostics; do not fail plugin startup for peer auto-derivation failures.
+- Preserve existing state file readability. Do not hash `safe_oc_session_id` or fallback project ids unless a future spec explicitly changes that.
 
-Session TTL uses `lastSeenAt + 1 day`. Expired session state runs finalization rather than blind deletion.
+## Functional Requirements
 
-Update `lastSeenAt` and `expiresAt` on session events, message staging updates, successful flushes, and commit triggers.
+### Project Identity Resolution
 
-TTL finalization is opportunistic; do not add a resident timer. Trigger scans at plugin startup/load state, after each `memcommit`, at session deleted/error/compacted boundaries, and during shutdown/`flushAll`.
+- For non-global `projectID`, normalize it and allow it as the project identity even when its safe form is shorter than 8 characters.
+- For `projectID=global`, do not write `projects/global.json` and do not derive `global`-based peer ids.
+- When `projectID=global`, derive a fallback project identity from the basename of the target OpenCode session-bound directory/cwd/project path obtained through the OpenCode session/project APIs.
+- Do not fallback to the plugin initialization directory, `process.cwd()`, or unrelated process-global state for project identity derivation.
+- Skip empty, invalid, or `global` project ids before using fallback identity.
+- If no stable session-bound source exists, auto peer derivation fails and existing fallback order applies: existing session peer id, explicit configured `peerId`, then no actor peer.
 
-Finalization must flush `pendingMessages` to server, trigger commit if messages were pushed or `capturedMessages` exist, and then remove local session state according to these rules:
+### Peer ID Generation
 
-- If `pendingMessages` and `capturedMessages` are both empty, delete local session state.
-- If pending message push fails, keep session state for retry.
-- If commit has a transport failure or no server response, keep session state for retry.
-- If the commit request receives any server response, even a business error, delete local session state and leave follow-up to server logs or user investigation.
-- Finalization still needs to trigger commit because current server memory extraction hangs off session commit; add-message alone does not extract memories.
+- Preserve `peerIdMode=auto` semantics: derive a project-scoped peer id, not a workspace, worktree, branch, or single-session peer id.
+- Preserve readable peer shape `<slug>_<short_project_id>` when a stable project identity exists.
+- Reuse an existing valid project file `peerId` before generating a new one.
+- If an existing project file contains an invalid `peerId`, warn, record it in `previousPeerIds`, and regenerate.
 
-Use atomic rename claiming for finalization:
+### Lazy Session State Initialization
 
-```text
-sessions/<id>.json -> finalizing/<id>.<pid>.<timestamp>.json
-```
+- If `message.updated`, `message.part.updated`, `memcommit`, or a tool path sees an OpenCode session id without a local session file, initialize the mapping lazily.
+- Lazy initialization only applies when the path has an OpenCode session id/context; an explicit OpenViking `session_id` argument must not be reinterpreted as an OpenCode session id.
+- Lazy initialization must first query the OpenCode session API for that session id, then resolve project/peer state from the returned session-bound metadata.
+- Lazy initialization failure must not drop buffered message role/text data. Later events or explicit `memcommit` can retry.
+- On successful lazy initialization, write the session file immediately and continue processing the pending event or tool request.
 
-Recover stale finalizing files on startup/load after 10 minutes.
+### Session State Peer Integrity Fix
 
-When retry is needed after push or commit transport failure, restore the finalizing file back to `sessions/<id>.json`.
+- Treat `projectID=global` as an unusable project identity even though it is a non-empty string.
+- Do not let event-provided `projectID=global` override a real project id returned by the OpenCode session or project APIs.
+- Resolve the project identity from the first usable non-global source: session API project id, project API id, then basename-derived session-bound directory/cwd/project fallback.
+- Use the resolved project identity to derive and persist `peerId` before building `ovSessionId` and before saving session state.
+- If a session truly cannot resolve a valid peer, keep that path explicit with a warning and test coverage so it is distinguishable from the current `projectID=global` regression.
 
-If stale finalizing recovery finds an active session file already exists, compare `lastSeenAt` and `updatedAt`; keep the newer active file and move the older file to `abandoned/`.
+### OpenCode SDK v2 Usage
 
-Plugin log rotation happens during `initLogger`: if `openviking-memory.log` exists and is non-empty, rename it to `openviking-memory.YYYYMMDD-HHMMSS.log` before writing a fresh active log. If the timestamp collides, append `-1`, `-2`, and so on. Do not add a retention cap.
+- Use only v2 APIs for session/project lookup, using request-object call shapes equivalent to `session.get({ sessionID, directory?, workspace? })` and `project.current({ directory?, workspace? })`.
+- Keep explicit defensive checks for the runtime client shape. If the v2 client is unavailable, warn and let peer auto-derivation fail through the normal fallback path.
+- Do not fallback to legacy `path/query` calls that can produce `projectID=global` for project-bound sessions.
+
+### Request Propagation
+
+- OpenViking HTTP requests must continue to send `X-OpenViking-Actor-Peer` when a valid peer id is resolved.
+- Requests must not send `X-OpenViking-Agent`.
+- Session message bodies must continue to use `peer_id` when a valid peer id is resolved.
+
+### Daily Log Rotation
+
+- Keep the active log filename as `openviking-memory.log`.
+- On plugin startup, inspect the active log file's local modified date.
+- Rotate the active log only when it is non-empty and its modified date is before the current local date, so repeated restarts on the same day do not create repeated backups.
+- Use the existing historical filename shape `openviking-memory.YYYYMMDD-HHMMSS.log`, with numeric suffixes for collisions.
+- If rotation fails, log the error and continue writing to `openviking-memory.log`.
 
 ## Testing Strategy
 
-Use Node's built-in `node:test` and `node:assert/strict`.
+Add or update focused tests under `examples/opencode-plugin/tests/`:
 
-Add focused tests for pure helper behavior where possible. Existing tests often inspect source text; prefer real behavior tests for new helpers when practical.
+- `utils-peer-identifiers.test.mjs`: short non-global project ids are accepted; `global` is rejected as direct project identity; directory-derived fallback uses the existing normalization rules.
+- `memory-session-state.test.mjs`: `projectID=global` uses session-bound directory/project metadata to write project and session state and derive `<readable>_<short_fallback>` peer ids.
+- `memory-session-state.test.mjs`: `projectID=global` with SDK session returning a real project id uses the SDK session project id.
+- `memory-session-state.test.mjs`: `projectID=global` with SDK session still global but project API returning a real id uses the project API id.
+- `memory-session-state.test.mjs`: directory/cwd fallback uses the basename of the session-bound path, not the full path.
+- `memory-session-state.test.mjs`: missing local mapping during message events lazily initializes state and preserves buffered message data.
+- `memory-tools-write.test.mjs` or `memory-session-state.test.mjs`: explicit OpenViking `session_id` arguments do not trigger OpenCode lazy initialization.
+- `memory-session-state.test.mjs` or a new focused test: lazy initialization failure keeps buffers and can retry.
+- `memory-session-state.test.mjs`: reproduce the current `projectID=global` path that writes `peerId: null`, then prove the fix uses a real project/session-bound identity and writes a valid peer id.
+- SDK call-shape test: v2 `session.get` and `project.current` receive request-object arguments with the expected session id, directory, and workspace fields.
+- `utils-log-rotation.test.mjs`: startup rotates `openviking-memory.log` only when the active log date is before today; multiple same-day starts keep the same active log.
+- Regression tests: non-global short project ids write project files and produce peer ids; `projectID=global` never writes `projects/global.json`.
 
-Required coverage for implementation:
-
-- peerId config precedence and fixed-mode invalid peer behavior.
-- auto peer derivation from `project.worktree`, `session.directory`, and `projectID`.
-- project file stability and no-overwrite initial create behavior.
-- session file serialization for `pendingMessages`, `messageRoles`, `capturedMessages`, and commit state.
-- old `openviking-session-map.json` backup behavior without migration.
-- local persistence degradation to in-memory state when state directory initialization fails.
-- finalization claim, stale finalizing recovery, and abandoned bad JSON behavior.
-- TTL finalization flush and commit-trigger decisions.
-- log startup rotation.
-- Windows-safe `npm run check` behavior through `scripts/check.mjs`.
-
-Documentation updates required:
-
-- `examples/opencode-plugin/README.md`
-- `examples/opencode-plugin/INSTALL.md`
-- `examples/opencode-plugin/INSTALL-ZH.md`
+Run `npm run check` and `npm test` from `examples/opencode-plugin` before considering the change complete.
 
 ## Boundaries
 
-Always: keep changes inside `examples/opencode-plugin` for this spec.
-
-Always: preserve active filename `openviking-memory.log` for current logs.
-
-Always: keep local persistence failures non-fatal unless a caller explicitly requires the state operation to succeed.
-
-Always: prefer simple JSON files and direct helper functions over new dependencies or framework-level abstractions.
-
-Ask first: changing OpenViking server APIs, storage paths, or memory extraction semantics.
-
-Ask first: adding npm dependencies.
-
-Ask first: changing package scripts beyond fixing the Windows glob issue with `scripts/check.mjs`.
-
-Never: migrate or delete old `viking://agent/...` server data as part of this scope.
-
-Never: use `project.name` in auto peer id derivation.
-
-Never: reintroduce runtime `X-OpenViking-Agent` propagation.
-
-Never: store all project/session state in one global map JSON file.
+- Always: use `peerId` and `peerIdMode`; keep request actor propagation on `X-OpenViking-Actor-Peer`.
+- Always: derive fallback project identity only from the target OpenCode session/project data.
+- Always: use basename, not the full path, when deriving fallback identity from session-bound directory/cwd/project paths.
+- Always: preserve pending message buffers when lazy initialization fails.
+- Always: treat `global` as unusable for peer project identity, even if it arrives from the OpenCode event payload.
+- Always: rotate `openviking-memory.log` by local day, not by startup count.
+- Always: keep state writes atomic where the current implementation already uses temp file plus rename.
+- Ask first: changing the persisted session/project JSON schema version beyond additive fields.
+- Ask first: changing the public plugin configuration surface beyond the v2 SDK dependency update.
+- Ask first: adding dependencies other than an OpenCode SDK/plugin version bump.
+- Never: restore `agentId` runtime compatibility or old `OPENVIKING_AGENT_ID` environment fallbacks.
+- Never: migrate old `viking://agent/...` server/storage data.
+- Never: reopen already-completed migration work from earlier issue sections unless it is required by a `## 下一步待改动点` item.
+- Never: use plugin initialization directory, process cwd, or OpenCode server process state as a fallback project identity.
+- Never: delete unrelated user changes or rewrite archived planning docs as part of this work.
 
 ## Success Criteria
 
-- Runtime requests use `X-OpenViking-Actor-Peer` and message body `peer_id` when a valid peer is resolved.
-- Runtime no longer depends on active `agentId` routing semantics, config fields, or old env vars.
-- The plugin creates and uses `openviking-sessions/` state files instead of active `openviking-session-map.json`.
-- One project file stabilizes peer id across sessions for the same normalized `projectID`.
-- One session file contains routing, message staging, and commit recovery state for the normalized OpenCode session id.
-- Expired sessions flush staged messages and trigger commit according to the confirmed finalization rules.
-- Concurrent finalization uses atomic rename claiming and can recover stale finalizing files.
-- Startup log rotation preserves the old non-empty log and writes new entries to `openviking-memory.log`.
-- `npm run check` works on Windows without relying on shell glob expansion.
-- README, INSTALL, and INSTALL-ZH describe only `peerId` / `peerIdMode`, the new session state directory, and startup log rotation.
-- Focused tests for changed behavior pass.
+- `projectID=global` no longer produces a `global` project file or `global`-based peer id.
+- Short non-global project ids can create project files and stable auto peer ids.
+- Existing sessions that did not emit `session.created` can still create local session state from later events or explicit tool/commit paths.
+- Explicit OpenViking `session_id` arguments are not treated as OpenCode session ids for lazy initialization.
+- Lazy initialization failures are retryable and do not discard buffered message content.
+- The known `projectID=global` root cause is covered by a regression test.
+- After the fix, sessions with SDK/project/directory metadata do not write or overwrite `peerId` with null.
+- OpenCode session/project lookups use v2 request-object API shapes when available.
+- OpenViking requests still propagate the resolved peer through `X-OpenViking-Actor-Peer` and `peer_id` message bodies.
+- `openviking-memory.log` creates at most one rollover backup per local day, even if the plugin restarts multiple times.
+- Focused tests cover the new global fallback, short project id, lazy initialization, null peer root cause regression, daily log rotation, and v2 call-shape behavior.
+- `npm run check`, `npm test`, and `git diff --check` pass.
 
 ## Open Questions
 
-- The user will later verify whether `project.worktree` satisfies the desired same-project identity across workspace/worktree scenarios.
+None for this spec. If a conflict appears during implementation, use only the issue document's `## 下一步待改动点` sections as this spec's scope authority; earlier sections remain background unless explicitly referenced by those follow-up items.

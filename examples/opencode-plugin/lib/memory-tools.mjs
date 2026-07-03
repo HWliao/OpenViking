@@ -11,7 +11,8 @@ import {
 const z = tool.schema
 
 export function createMemoryTools({ config, sessionManager, projectDirectory }) {
-  function getRequestConfig(context) {
+  async function getRequestConfig(context, { allowLazy = true } = {}) {
+    if (allowLazy && context?.sessionID) await sessionManager.ensureSessionInitialized?.(context.sessionID)
     return sessionManager.getRequestConfig(context?.sessionID)
   }
 
@@ -31,6 +32,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         try {
           let sessionId = args.session_id
           if (!sessionId && context.sessionID) {
+            await sessionManager.ensureSessionInitialized?.(context.sessionID)
             sessionId = sessionManager.getMappedSessionId(context.sessionID)
           }
 
@@ -43,7 +45,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           if (args.score_threshold !== undefined) body.score_threshold = args.score_threshold
           if (mode === "deep" && sessionId) body.session_id = sessionId
 
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context, { allowLazy: !args.session_id })
           const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: mode === "deep" ? "/api/v1/search/search" : "/api/v1/search/find",
@@ -72,7 +74,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
 
         try {
           let level = args.level ?? "auto"
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const actorPeerId = effectivePeerId(requestConfig)
           if (level === "auto") {
             level = await resolveReadLevel(requestConfig, args.uri, context.abort, actorPeerId)
@@ -116,7 +118,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           } else {
             endpoint = `/api/v1/fs/ls?uri=${encodedUri}&recursive=${args.recursive ? "true" : "false"}&simple=${args.simple ? "true" : "false"}`
           }
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const response = await makeRequest(requestConfig, {
             method: "GET",
             endpoint,
@@ -139,13 +141,14 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
       },
       async execute(args, context) {
         const explicitSessionId = args.session_id?.trim() || undefined
+        if (!explicitSessionId && context.sessionID) await sessionManager.ensureSessionInitialized?.(context.sessionID)
         const sessionId = explicitSessionId ?? (context.sessionID ? sessionManager.getMappedSessionId(context.sessionID) : undefined)
         if (!sessionId) {
           return "Error: No OpenViking session is associated with the current OpenCode session. Start or resume a normal OpenCode session first, or pass session_id."
         }
 
         try {
-          const result = await sessionManager.commitSession(sessionId, context.sessionID, context.abort)
+          const result = await sessionManager.commitSession(sessionId, explicitSessionId ? undefined : context.sessionID, context.abort)
           return formatCommitResult(sessionId, result)
         } catch (error) {
           log("ERROR", "memcommit", "Commit failed", { error: error?.message, session_id: sessionId })
@@ -174,7 +177,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           if (args.case_insensitive !== undefined) body.case_insensitive = args.case_insensitive
           if (args.exclude_uri) body.exclude_uri = args.exclude_uri
           if (args.level_limit !== undefined) body.level_limit = args.level_limit
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: "/api/v1/search/grep",
@@ -206,7 +209,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         try {
           const body = { uri, pattern: args.pattern }
           if (args.node_limit !== undefined) body.node_limit = args.node_limit
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: "/api/v1/search/glob",
@@ -241,7 +244,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         if (args.parent && !args.parent.startsWith("viking://resources")) return "Error: `parent` must be under viking://resources/."
 
         try {
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const actorPeerId = effectivePeerId(requestConfig)
           const result = await addMemaddResource(requestConfig, args, projectDirectory, context.abort, actorPeerId)
           if (result.error) return result.error
@@ -276,7 +279,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
             wait: args.wait ?? false,
           }
           if (args.timeout !== undefined) body.timeout = args.timeout
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: "/api/v1/content/write",
@@ -308,7 +311,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         if (validationError) return validationError
 
         try {
-          const requestConfig = getRequestConfig(context)
+          const requestConfig = await getRequestConfig(context)
           const response = await makeRequest(requestConfig, {
             method: "DELETE",
             endpoint: `/api/v1/fs?uri=${encodeURIComponent(args.uri)}&recursive=${args.recursive ? "true" : "false"}`,
@@ -328,7 +331,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
       args: {},
       async execute(_args, context) {
         try {
-          const queue = await getQueueStatus(getRequestConfig(context), context.abort)
+          const queue = await getQueueStatus(await getRequestConfig(context), context.abort)
           return JSON.stringify(queue, null, 2)
         } catch (error) {
           log("ERROR", "memqueue", "Queue status failed", { error: error?.message })

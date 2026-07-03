@@ -1,36 +1,31 @@
-# Todo: OpenCode Plugin peerId Session State
+# Todo: OpenCode Plugin Peer Project Identity Follow-Up
 
-## Phase 1: Verification Foundation
+- [x] Task 1: Update identifier and log utility behavior
+  - Acceptance: short non-global project ids derive valid peer ids; `global` is rejected as direct identity; basename fallback is used; same-day log startup does not rotate repeatedly.
+  - Verify: `npm test -- tests/utils-peer-identifiers.test.mjs tests/utils-log-rotation.test.mjs`
+  - Files: `examples/opencode-plugin/lib/utils.mjs`, `examples/opencode-plugin/tests/utils-peer-identifiers.test.mjs`, `examples/opencode-plugin/tests/utils-log-rotation.test.mjs`
 
-- [x] Task 1: Add Windows-safe `scripts/check.mjs` and update `npm run check`.
-- [x] Checkpoint: `npm run check` no longer depends on shell glob expansion.
+- [x] Task 2: Migrate OpenCode session/project lookup to v2 request objects
+  - Acceptance: session/project lookup uses v2 request-object calls only; no legacy `path/query` fallback remains for peer derivation; missing v2 APIs warn and fail auto derivation normally.
+  - Verify: `npm test -- tests/memory-session-state.test.mjs`; `npm run check`
+  - Files: `examples/opencode-plugin/lib/memory-session.mjs`, `examples/opencode-plugin/tests/memory-session-state.test.mjs`, `examples/opencode-plugin/package.json`, `examples/opencode-plugin/package-lock.json`
 
-## Phase 2: Peer Runtime Basics
+- [x] Task 3: Fix `projectID=global` identity resolution and null peer state
+  - Acceptance: event `global` cannot override real SDK/project identity; basename fallback works; resolvable sessions persist valid `peerId` and peer-derived `ovSessionId`; `projects/global.json` is never written.
+  - Verify: `npm test -- tests/memory-session-state.test.mjs`
+  - Files: `examples/opencode-plugin/lib/memory-session.mjs`, `examples/opencode-plugin/tests/memory-session-state.test.mjs`
 
-- [x] Task 2: Replace config/env `agentId` identity with `peerId` / `peerIdMode`.
-- [x] Task 3: Implement peer/session identifier helpers and focused tests.
-- [x] Checkpoint: request headers and identifier tests prove peer runtime basics.
+- [x] Task 4: Add lazy initialization for existing OpenCode sessions
+  - Acceptance: missing local mapping during message events initializes from OpenCode session metadata; buffered role/text survives; failure keeps buffers for retry.
+  - Verify: `npm test -- tests/memory-session-state.test.mjs`
+  - Files: `examples/opencode-plugin/lib/memory-session.mjs`, `examples/opencode-plugin/tests/memory-session-state.test.mjs`
 
-## Phase 3: Local State Split
+- [x] Task 5: Enforce memory tool and memcommit lazy-init boundaries
+  - Acceptance: current OpenCode context can lazy initialize; explicit OpenViking `session_id` does not trigger OpenCode lookup; actor peer still propagates when context resolves a peer.
+  - Verify: `npm test -- tests/memory-tools-write.test.mjs tests/memory-session-state.test.mjs`
+  - Files: `examples/opencode-plugin/lib/memory-session.mjs`, `examples/opencode-plugin/lib/memory-tools.mjs`, `examples/opencode-plugin/tests/memory-tools-write.test.mjs`, `examples/opencode-plugin/tests/memory-session-state.test.mjs`
 
-- [x] Task 4: Add `openviking-sessions/` directory and project state files.
-- [x] Task 5: Add session state files and legacy `openviking-session-map.json` backup.
-- [x] Checkpoint: active state no longer uses one global map file.
-
-## Phase 4: Runtime Wiring
-
-- [x] Task 6: Wire peer identity through session capture and message flush.
-- [x] Task 7: Update memory, code, and recall tool peer propagation.
-- [x] Checkpoint: runtime request paths use peer identity only.
-
-## Phase 5: Finalization and Recovery
-
-- [x] Task 8: Implement TTL finalization, atomic claim, retry restore, and stale recovery.
-- [x] Task 9: Confirm startup log rotation behavior remains aligned with spec.
-- [x] Checkpoint: expired sessions finalize safely and log rotation still passes.
-
-## Phase 6: Documentation and Final Verification
-
-- [x] Task 10: Update README, INSTALL, and INSTALL-ZH.
-- [x] Task 11: Run focused verification and package verification.
-- [x] Checkpoint: all `docs/SPEC.md` success criteria are met or blockers are documented.
+- [x] Task 6: Run full plugin regression and update user-facing plugin docs if needed
+  - Acceptance: full plugin checks pass; docs are updated only if they contradict changed behavior; root `git diff --check` passes.
+  - Verify: `npm run check`; `npm test`; `git diff --check`
+  - Files: `examples/opencode-plugin/README.md`, `examples/opencode-plugin/INSTALL.md`, `examples/opencode-plugin/INSTALL-ZH.md`, `docs/issues/opencode-plugin-peer-id-migration-issue.md`

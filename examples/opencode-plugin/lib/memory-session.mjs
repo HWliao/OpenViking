@@ -1,10 +1,12 @@
 import fs from "fs"
 import path from "path"
 import {
+  basenameIdentifierFromPath,
   buildOpenVikingSessionId,
   deriveAutoPeerId,
   effectivePeerId,
   isValidPeerId,
+  isUsableProjectIdentity,
   log,
   makeRequest,
   normalizeIdentifierPart,
@@ -285,11 +287,20 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       return
     }
 
+    const mapping = await establishSessionMapping(sessionId, event)
+    if (!mapping) return
+    await applyBufferedMessages(sessionId, mapping)
+    await saveSessionState(mapping)
+  }
+
+  async function establishSessionMapping(sessionId, event = {}, { requirePeer = false, reason = "session.created" } = {}) {
     const existing = sessionMap.get(sessionId)
     const peerContext = await resolvePeerContext(sessionId, event, existing)
+    if (requirePeer && !isValidPeerId(peerContext.peerId)) return null
+
     const sessionIds = buildOpenVikingSessionId({ peerId: peerContext.peerId, openCodeSessionId: sessionId })
     const ovSessionId = await ensureOpenVikingSession(sessionIds.ovSessionId, peerContext.peerId)
-    if (!ovSessionId) return
+    if (!ovSessionId) return null
 
     const mapping = existing ?? createSessionMapping({
       openCodeSessionId: sessionId,
@@ -307,38 +318,50 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       safeProjectId: peerContext.safeProjectId,
     })
     sessionMap.set(sessionId, mapping)
-
-    const bufferedMessages = sessionMessageBuffer.get(sessionId)
-    if (bufferedMessages?.length) {
-      for (const buffered of bufferedMessages) {
-        if (buffered.role) mapping.messageRoles.set(buffered.messageId, buffered.role)
-        if (buffered.content) {
-          mapping.pendingMessages.set(
-            buffered.messageId,
-            mergeMessageContent(mapping.pendingMessages.get(buffered.messageId), buffered.content),
-          )
-        }
-      }
-      sessionMessageBuffer.delete(sessionId)
-      await flushPendingMessages(sessionId, mapping)
-    }
-
-    await saveSessionState(mapping)
     log("INFO", "event", "Session mapping established", {
       opencode_session: sessionId,
       openviking_session: ovSessionId,
       peer_id: peerContext.peerId ?? "none",
       peer_id_source: peerContext.source,
+      reason,
     })
+    return mapping
+  }
+
+  async function applyBufferedMessages(sessionId, mapping) {
+    const bufferedMessages = sessionMessageBuffer.get(sessionId)
+    if (!bufferedMessages?.length) return
+    for (const buffered of bufferedMessages) {
+      if (buffered.role) mapping.messageRoles.set(buffered.messageId, buffered.role)
+      if (buffered.content) {
+        mapping.pendingMessages.set(
+          buffered.messageId,
+          mergeMessageContent(mapping.pendingMessages.get(buffered.messageId), buffered.content),
+        )
+      }
+    }
+    sessionMessageBuffer.delete(sessionId)
+    await flushPendingMessages(sessionId, mapping)
+  }
+
+  async function ensureSessionInitialized(sessionId) {
+    if (!sessionId) return null
+    const existing = sessionMap.get(sessionId)
+    if (existing && isValidPeerId(existing.peerId)) return existing
+    const mapping = await establishSessionMapping(sessionId, { properties: { info: { id: sessionId } } }, { requirePeer: true, reason: existing ? "repair" : "lazy" })
+    if (!mapping) return null
+    await applyBufferedMessages(sessionId, mapping)
+    await saveSessionState(mapping)
+    return mapping
   }
 
   async function resolvePeerContext(sessionId, event, existing) {
     const eventSession = event?.properties?.info ?? {}
-    const sdkSession = await fetchOpenCodeSession(sessionId, eventSession.directory)
-    const session = { ...sdkSession, ...eventSession }
-    const project = await fetchOpenCodeProject(session.directory)
-    const projectID = session.projectID ?? project?.id
-    const safeProjectId = normalizeIdentifierPart(projectID)
+    const sdkSession = await fetchOpenCodeSession(sessionId, eventSession)
+    const session = { ...eventSession, ...(sdkSession ?? {}) }
+    const project = await fetchOpenCodeProject(session)
+    const identity = resolveProjectIdentity({ session, project })
+    const { projectID, safeProjectId } = identity
 
     if (config.peerIdMode === "fixed") {
       const fixed = resolveFixedPeerId(config).peerId
@@ -348,7 +371,7 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       return { peerId: fixed, projectID, safeProjectId, source: fixed ? "fixed" : "none" }
     }
 
-    if (safeProjectId.length >= 8) {
+    if (isUsableProjectIdentity(safeProjectId)) {
       const projectState = await readProjectState(safeProjectId)
       if (isValidPeerId(projectState?.peerId)) {
         return { peerId: String(projectState.peerId).trim(), projectID, safeProjectId, source: "project-file" }
@@ -378,16 +401,57 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     if (isValidPeerId(existing?.peerId)) return { peerId: existing.peerId, projectID, safeProjectId, source: "session-state" }
     const explicit = effectivePeerId(config)
     if (explicit) return { peerId: explicit, projectID, safeProjectId, source: "explicit-fallback" }
+    log("WARN", "session", "Unable to resolve OpenCode project peer identity; peer propagation disabled", {
+      session_id: sessionId,
+      project_id: projectID,
+      safe_project_id: safeProjectId,
+      identity_source: identity.source,
+    })
     return { peerId: null, projectID, safeProjectId, source: "none" }
   }
 
-  async function fetchOpenCodeSession(sessionId, directory) {
-    if (typeof client?.session?.get !== "function") return null
+  function resolveProjectIdentity({ session, project }) {
+    const sessionProjectId = usableProjectId(session?.projectID)
+    if (sessionProjectId) return { projectID: sessionProjectId, safeProjectId: normalizeIdentifierPart(sessionProjectId), source: "session-api" }
+
+    const projectId = usableProjectId(project?.id)
+    if (projectId) return { projectID: projectId, safeProjectId: normalizeIdentifierPart(projectId), source: "project-api" }
+
+    const fallbackPath = project?.worktree || project?.directory || session?.directory || session?.cwd || session?.path
+    const fallbackId = basenameIdentifierFromPath(fallbackPath)
+    if (isUsableProjectIdentity(fallbackId)) return { projectID: fallbackId, safeProjectId: fallbackId, source: "path-basename" }
+
+    const rawProjectId = session?.projectID ?? project?.id
+    return { projectID: rawProjectId, safeProjectId: normalizeIdentifierPart(rawProjectId), source: "none" }
+  }
+
+  function usableProjectId(value) {
+    return isUsableProjectIdentity(value) ? String(value).trim() : null
+  }
+
+  function makeOpenCodeLookupRequest(base = {}) {
+    const request = { ...base }
+    const directory = base.directory
+    const workspace = base.workspace ?? base.workspaceID
+    delete request.directory
+    delete request.workspace
+    delete request.workspaceID
+    if (directory) request.directory = directory
+    if (workspace) request.workspace = workspace
+    return request
+  }
+
+  async function fetchOpenCodeSession(sessionId, context = {}) {
+    if (typeof client?.session?.get !== "function") {
+      log("WARN", "session", "OpenCode v2 session API is unavailable for peer derivation", { session_id: sessionId })
+      return null
+    }
     try {
-      const result = await client.session.get({
-        path: { id: sessionId },
-        query: directory ? { directory } : undefined,
-      })
+      const result = await client.session.get(makeOpenCodeLookupRequest({
+        sessionID: sessionId,
+        directory: context.directory,
+        workspace: context.workspace ?? context.workspaceID,
+      }))
       return unwrapClientResult(result)
     } catch (error) {
       log("WARN", "session", "Failed to query OpenCode session for peer derivation", { session_id: sessionId, error: error?.message })
@@ -395,13 +459,19 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     }
   }
 
-  async function fetchOpenCodeProject(directory) {
-    if (typeof client?.project?.current !== "function") return null
+  async function fetchOpenCodeProject(context = {}) {
+    if (typeof client?.project?.current !== "function") {
+      log("WARN", "session", "OpenCode v2 project API is unavailable for peer derivation")
+      return null
+    }
     try {
-      const result = await client.project.current({ query: directory ? { directory } : undefined })
+      const result = await client.project.current(makeOpenCodeLookupRequest({
+        directory: context.directory,
+        workspace: context.workspace ?? context.workspaceID,
+      }))
       return unwrapClientResult(result)
     } catch (error) {
-      log("WARN", "session", "Failed to query OpenCode project for peer derivation", { directory, error: error?.message })
+      log("WARN", "session", "Failed to query OpenCode project for peer derivation", { directory: context.directory, error: error?.message })
       return null
     }
   }
@@ -411,7 +481,7 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
   }
 
   async function readProjectState(safeProjectId) {
-    if (!persistenceEnabled || safeProjectId.length < 8) return null
+    if (!persistenceEnabled || !isUsableProjectIdentity(safeProjectId)) return null
     const filePath = getProjectStatePath(safeProjectId)
     try {
       if (!fs.existsSync(filePath)) return null
@@ -424,7 +494,7 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
   }
 
   async function writeProjectState(safeProjectId, state) {
-    if (!persistenceEnabled || safeProjectId.length < 8) return state
+    if (!persistenceEnabled || !isUsableProjectIdentity(safeProjectId)) return state
     const filePath = getProjectStatePath(safeProjectId)
     const json = JSON.stringify(state, null, 2)
     try {
@@ -550,9 +620,11 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     const finish = message.finish
     if (!sessionId || !messageId) return
 
-    const mapping = sessionMap.get(sessionId)
+    let mapping = sessionMap.get(sessionId)
     if (!mapping) {
       upsertBufferedMessage(sessionId, messageId, role ? { role } : {})
+      mapping = await ensureSessionInitialized(sessionId)
+      if (mapping) await flushPendingMessages(sessionId, mapping)
       return
     }
 
@@ -573,9 +645,11 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     const messageId = part.messageID
     if (!sessionId || !messageId || part.type !== "text" || !part.text?.trim()) return
 
-    const mapping = sessionMap.get(sessionId)
+    let mapping = sessionMap.get(sessionId)
     if (!mapping) {
       upsertBufferedMessage(sessionId, messageId, { content: part.text })
+      mapping = await ensureSessionInitialized(sessionId)
+      if (mapping) await flushPendingMessages(sessionId, mapping)
       return
     }
 
@@ -831,6 +905,8 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
 
   async function commitSession(sessionId, opencodeSessionId, abortSignal) {
     try {
+      if (!opencodeSessionId) return await commitExplicitOpenVikingSession(sessionId, abortSignal)
+
       const mapped = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
       let mapping = mapped
       if (!mapping || mapping.ovSessionId !== sessionId) {
@@ -859,6 +935,42 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       await flushDebouncedSessionSaves({ touch: false })
       await finalizeExpiredSessions()
     }
+  }
+
+  async function commitExplicitOpenVikingSession(sessionId, abortSignal) {
+    const response = await makeRequest(config, {
+      method: "POST",
+      endpoint: `/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`,
+      timeoutMs: 10000,
+      abortSignal,
+      actorPeerId: effectivePeerId(config),
+    })
+    const result = unwrapResponse(response)
+    const taskId = result?.task_id
+    if (!taskId) return { status: "completed", result }
+
+    const task = await waitForExplicitCommitCompletion(taskId, abortSignal)
+    if (!task) return { status: "accepted", task_id: taskId }
+    return { status: task.status, task }
+  }
+
+  async function waitForExplicitCommitCompletion(taskId, abortSignal, timeoutMs = COMMIT_WAIT_TIMEOUT_MS) {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < timeoutMs) {
+      if (abortSignal?.aborted) throw new Error("Operation aborted")
+      const response = await makeRequest(config, {
+        method: "GET",
+        endpoint: `/api/v1/tasks/${encodeURIComponent(taskId)}`,
+        timeoutMs: 5000,
+        abortSignal,
+        actorPeerId: effectivePeerId(config),
+      })
+      const task = unwrapResponse(response)
+      if (task.status === "completed") return task
+      if (task.status === "failed") throw new Error(task.error || "Background commit failed")
+      await sleep(2000, abortSignal)
+    }
+    return null
   }
 
   async function finalizeExpiredSessions() {
@@ -1026,6 +1138,7 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     getMappedSessionId,
     getMappedAgentId,
     getRequestConfig,
+    ensureSessionInitialized,
     commitSession,
     flushAll,
     flushSession,

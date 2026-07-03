@@ -144,10 +144,18 @@ function rotateExistingLog(filePath) {
     if (!fs.existsSync(filePath)) return
     const stat = fs.statSync(filePath)
     if (!stat.isFile() || stat.size === 0) return
+    if (!isBeforeToday(stat.mtime)) return
     fs.renameSync(filePath, nextLogBackupPath(filePath))
   } catch (error) {
     console.error("Failed to rotate OpenViking plugin log:", error)
   }
+}
+
+function isBeforeToday(date) {
+  const today = new Date()
+  return date.getFullYear() < today.getFullYear()
+    || (date.getFullYear() === today.getFullYear() && date.getMonth() < today.getMonth())
+    || (date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() < today.getDate())
 }
 
 function nextLogBackupPath(filePath) {
@@ -237,6 +245,15 @@ export function normalizeIdentifierPart(value) {
     .replace(/^_+|_+$/g, "")
 }
 
+export function basenameIdentifierFromPath(value) {
+  return normalizeIdentifierPart(path.basename(String(value ?? "")))
+}
+
+export function isUsableProjectIdentity(value) {
+  const safeProjectId = normalizeIdentifierPart(value)
+  return safeProjectId.length > 0 && safeProjectId.toLowerCase() !== "global"
+}
+
 export function isValidPeerId(value) {
   const peerId = String(value ?? "").trim()
   return peerId.length > 0 && peerId.length <= MAX_PEER_ID_LENGTH && /^[A-Za-z0-9_-]+$/.test(peerId)
@@ -249,7 +266,7 @@ export function resolveFixedPeerId(config = {}) {
 
 export function deriveAutoPeerId({ project, session, projectID } = {}) {
   const safeProjectId = normalizeIdentifierPart(projectID)
-  if (safeProjectId.length < 8) {
+  if (!isUsableProjectIdentity(projectID)) {
     return { peerId: null, safeProjectId, shortProjectId: null }
   }
 

@@ -40,6 +40,12 @@ test("deriveAutoPeerId falls back to session directory and rejects short project
     project: { worktree: "D:/work/OpenViking" },
     session: {},
     projectID: "abc",
+  }).peerId, "OpenViking_abc")
+
+  assert.equal(deriveAutoPeerId({
+    project: { worktree: "D:/work/OpenViking" },
+    session: {},
+    projectID: "global",
   }).peerId, null)
 })
 

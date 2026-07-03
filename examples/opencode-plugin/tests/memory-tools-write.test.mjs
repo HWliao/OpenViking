@@ -16,3 +16,10 @@ test("memwrite uses content/write with safe defaults and peer propagation", asyn
   assert.match(source, /actorPeerId,/)
   assert.match(source, /mode: z\.enum\(\["create", "append", "replace"\]\)/)
 })
+
+test("memcommit does not treat explicit OpenViking session_id as OpenCode session id", async () => {
+  const source = await readFile(memoryToolsPath, "utf8")
+
+  assert.match(source, /const explicitSessionId = args\.session_id\?\.trim\(\) \|\| undefined/)
+  assert.match(source, /commitSession\(sessionId, explicitSessionId \? undefined : context\.sessionID, context\.abort\)/)
+})

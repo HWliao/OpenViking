@@ -44,6 +44,7 @@ export function createMemoryRecall({ config, sessionManager }) {
   async function performRecallSearch(query, sessionId) {
     try {
       const body = { query: query.slice(0, 4000), limit: 20 }
+      if (sessionId) await sessionManager.ensureSessionInitialized?.(sessionId)
       const requestConfig = sessionManager.getRequestConfig(sessionId)
       const response = await makeRequest(requestConfig, {
         method: "POST",
