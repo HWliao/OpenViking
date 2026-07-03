@@ -115,9 +115,8 @@ Create `~/.config/opencode/openviking-config.json`:
   "apiKey": "",
   "account": "",
   "user": "",
-  "agentId": "",
-  "agentIdMode": "fixed",
   "peerId": "",
+  "peerIdMode": "auto",
   "enabled": true,
   "timeoutMs": 30000,
   "repoContext": { "enabled": true, "cacheTtlMs": 60000 },
@@ -137,17 +136,15 @@ headers sent as `X-OpenViking-Account` and `X-OpenViking-User`; leave them empty
 when using API-key mode with user/admin API keys.
 `peerId` is sent as `X-OpenViking-Actor-Peer` on data-plane memory/resource
 requests; captured session messages store it as body `peer_id`. Configure
-`peerId` explicitly when peer-scoped memory routing is needed.
+`peerId` explicitly when fixed peer-scoped memory routing is needed.
 
-`agentIdMode` defaults to `fixed`, which preserves the existing behavior and uses
-the configured `agentId` directly. Set it to `auto` to derive a session-scoped
-agent id from the `session.created` event's `info.cwd` or `info.directory`;
-unsupported characters are replaced with `_`. If directory derivation fails,
-the plugin falls back to `agentId`, then to the server default.
+`peerIdMode` defaults to `auto`. In auto mode the plugin derives a stable project
+peer from the OpenCode project/worktree information and stores it under
+`openviking-sessions/projects/`. Set `peerIdMode` to `fixed` to use the explicit
+`peerId`; if a fixed peer is missing or invalid, peer propagation is disabled.
 
 `OPENVIKING_API_KEY`, `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`,
-`OPENVIKING_AGENT_ID`, and `OPENVIKING_PEER_ID` take precedence over values in this file.
-`OPENVIKING_AGENT_ID_MODE` can override `agentIdMode`.
+`OPENVIKING_PEER_ID`, and `OPENVIKING_PEER_ID_MODE` take precedence over values in this file.
 
 For advanced setups, `OPENVIKING_PLUGIN_CONFIG` can point to another config file path.
 
@@ -264,6 +261,11 @@ Use this after `codeoutline` or other evidence shows the symbol exists in that f
 The plugin writes runtime files to `~/.config/opencode/openviking/` by default:
 
 - `openviking-memory.log`
-- `openviking-session-map.json`
+- `openviking-memory.YYYYMMDD-HHMMSS.log` startup log backups
+- `openviking-sessions/`
+
+If an old `openviking-session-map.json` exists, the plugin backs it up as
+`openviking-session-map.v1-backup-YYYYMMDD-HHMMSS.json` and starts using
+`openviking-sessions/`; old map contents are not migrated.
 
 Set `runtime.dataDir` in config to override this directory.

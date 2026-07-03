@@ -25,11 +25,11 @@ export async function OpenVikingPlugin({ client, directory }) {
   }
 
   const repoContext = createRepoContext({ config })
-  const sessionManager = createMemorySessionManager({ config, pluginRoot: dataDir })
+  const sessionManager = createMemorySessionManager({ config, pluginRoot: dataDir, client })
   const recall = createMemoryRecall({ config, sessionManager })
   const vikingUriGuard = createVikingUriGuard()
   const tools = createMemoryTools({ config, sessionManager, projectDirectory: directory })
-  const codeTools = createCodeTools({ config })
+  const codeTools = createCodeTools({ config, sessionManager })
 
   await sessionManager.init()
 

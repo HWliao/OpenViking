@@ -18,7 +18,7 @@ export function createRepoContext({ config }) {
         method: "GET",
         endpoint: `/api/v1/fs/ls?uri=${encodeURIComponent("viking://resources/")}&recursive=false&simple=false`,
         timeoutMs: 8000,
-        actorPeerId: effectivePeerId(config),
+        actorPeerId: effectivePeerId(requestConfig),
       })
       const result = unwrapResponse(response)
       const items = Array.isArray(result) ? result : []

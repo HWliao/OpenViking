@@ -15,7 +15,6 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
     return sessionManager.getRequestConfig(context?.sessionID)
   }
 
-  const actorPeerId = effectivePeerId(config)
   return {
     memsearch: tool({
       description:
@@ -44,12 +43,13 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           if (args.score_threshold !== undefined) body.score_threshold = args.score_threshold
           if (mode === "deep" && sessionId) body.session_id = sessionId
 
-          const response = await makeRequest(getRequestConfig(context), {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: mode === "deep" ? "/api/v1/search/search" : "/api/v1/search/find",
             body,
             abortSignal: context.abort,
-            actorPeerId,
+            actorPeerId: effectivePeerId(requestConfig),
           })
           return formatSearchResults(unwrapResponse(response), args.query, { mode })
         } catch (error) {
@@ -72,10 +72,12 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
 
         try {
           let level = args.level ?? "auto"
+          const requestConfig = getRequestConfig(context)
+          const actorPeerId = effectivePeerId(requestConfig)
           if (level === "auto") {
-            level = await resolveReadLevel(getRequestConfig(context), args.uri, context.abort, actorPeerId)
+            level = await resolveReadLevel(requestConfig, args.uri, context.abort, actorPeerId)
           }
-          const response = await makeRequest(getRequestConfig(context), {
+          const response = await makeRequest(requestConfig, {
             method: "GET",
             endpoint: `/api/v1/content/${level}?uri=${encodeURIComponent(args.uri)}`,
             abortSignal: context.abort,
@@ -114,11 +116,12 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           } else {
             endpoint = `/api/v1/fs/ls?uri=${encodedUri}&recursive=${args.recursive ? "true" : "false"}&simple=${args.simple ? "true" : "false"}`
           }
-          const response = await makeRequest(getRequestConfig(context), {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             method: "GET",
             endpoint,
             abortSignal: context.abort,
-            actorPeerId,
+            actorPeerId: effectivePeerId(requestConfig),
           })
           return JSON.stringify({ view, result: unwrapResponse(response) }, null, 2)
         } catch (error) {
@@ -171,12 +174,13 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
           if (args.case_insensitive !== undefined) body.case_insensitive = args.case_insensitive
           if (args.exclude_uri) body.exclude_uri = args.exclude_uri
           if (args.level_limit !== undefined) body.level_limit = args.level_limit
-          const response = await makeRequest(getRequestConfig(context), {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: "/api/v1/search/grep",
             body,
             abortSignal: context.abort,
-            actorPeerId,
+            actorPeerId: effectivePeerId(requestConfig),
           })
           return JSON.stringify(unwrapResponse(response), null, 2)
         } catch (error) {
@@ -202,12 +206,13 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         try {
           const body = { uri, pattern: args.pattern }
           if (args.node_limit !== undefined) body.node_limit = args.node_limit
-          const response = await makeRequest(getRequestConfig(context), {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: "/api/v1/search/glob",
             body,
             abortSignal: context.abort,
-            actorPeerId,
+            actorPeerId: effectivePeerId(requestConfig),
           })
           return JSON.stringify(unwrapResponse(response), null, 2)
         } catch (error) {
@@ -237,6 +242,7 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
 
         try {
           const requestConfig = getRequestConfig(context)
+          const actorPeerId = effectivePeerId(requestConfig)
           const result = await addMemaddResource(requestConfig, args, projectDirectory, context.abort, actorPeerId)
           if (result.error) return result.error
           const queue = await getQueueStatus(requestConfig, context.abort)
@@ -270,12 +276,13 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
             wait: args.wait ?? false,
           }
           if (args.timeout !== undefined) body.timeout = args.timeout
-          const response = await makeRequest(config, {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             method: "POST",
             endpoint: "/api/v1/content/write",
             body,
             abortSignal: context.abort,
-            actorPeerId,
+            actorPeerId: effectivePeerId(requestConfig),
           })
           return JSON.stringify({ write: unwrapResponse(response) }, null, 2)
         } catch (error) {
@@ -301,11 +308,12 @@ export function createMemoryTools({ config, sessionManager, projectDirectory }) 
         if (validationError) return validationError
 
         try {
-          const response = await makeRequest(getRequestConfig(context), {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             method: "DELETE",
             endpoint: `/api/v1/fs?uri=${encodeURIComponent(args.uri)}&recursive=${args.recursive ? "true" : "false"}`,
             abortSignal: context.abort,
-            actorPeerId,
+            actorPeerId: effectivePeerId(requestConfig),
           })
           return JSON.stringify(unwrapResponse(response), null, 2)
         } catch (error) {

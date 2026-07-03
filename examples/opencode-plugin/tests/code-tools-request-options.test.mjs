@@ -12,8 +12,8 @@ test("code tools propagate actorPeerId to every code request", async () => {
   const source = await readFile(codeToolsPath, "utf8")
 
   assert.match(source, /import \{ effectivePeerId,/)
-  assert.match(source, /const actorPeerId = effectivePeerId\(config\)/)
-  assert.equal((source.match(/actorPeerId,\n\s+abortSignal: context\.abort/g) ?? []).length, 3)
+  assert.match(source, /function getRequestConfig\(context\)/)
+  assert.equal((source.match(/actorPeerId: effectivePeerId\(requestConfig\)/g) ?? []).length, 3)
 })
 
 test("code tool descriptions restrict use to confirmed viking code repositories", async () => {
@@ -31,5 +31,7 @@ test("memory recall search payload matches strict server schema", async () => {
   const source = await readFile(memoryRecallPath, "utf8")
 
   assert.match(source, /const body = \{ query: query\.slice\(0, 4000\), limit: 20 \}/)
+  assert.match(source, /const requestConfig = sessionManager\.getRequestConfig\(sessionId\)/)
+  assert.match(source, /actorPeerId: effectivePeerId\(requestConfig\)/)
   assert.doesNotMatch(source, /mode:\s*"auto"/)
 })

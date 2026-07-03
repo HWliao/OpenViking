@@ -96,9 +96,8 @@ export { OpenVikingPlugin, default } from "./openviking/index.mjs"
   "apiKey": "",
   "account": "",
   "user": "",
-  "agentId": "",
-  "agentIdMode": "fixed",
   "peerId": "",
+  "peerIdMode": "auto",
   "enabled": true,
   "timeoutMs": 30000,
   "repoContext": { "enabled": true, "cacheTtlMs": 60000 },
@@ -124,14 +123,10 @@ export OPENVIKING_API_KEY="your-api-key-here"
 user/admin API key 的 API_KEY mode 时应留空。
 `peerId` 会作为 `X-OpenViking-Actor-Peer` 用于数据面的 memory/resource 请求；捕获 session message 时仍写入 body `peer_id`。需要 peer 维度路由时请显式配置。
 
-`agentIdMode` 默认是 `fixed`，保持现有行为，直接使用配置里的 `agentId`。
-设为 `auto` 后，插件会在 `session.created` 时从 `info.cwd` 或 `info.directory` 派生当前 session 的 agent id；
-不安全字符会替换为 `_`。如果目录派生失败，会回退到 `agentId`，再回退到服务端默认值。
+`peerIdMode` 默认是 `auto`。auto 模式会根据 OpenCode project/worktree 信息派生稳定的 project peer，并写入 `openviking-sessions/projects/`。设为 `fixed` 时只使用显式 `peerId`；如果 fixed peer 缺失或无效，则禁用 peer 传播。
 
-`OPENVIKING_API_KEY`、`OPENVIKING_ACCOUNT`、`OPENVIKING_USER`、`OPENVIKING_AGENT_ID`、
-`OPENVIKING_PEER_ID`
+`OPENVIKING_API_KEY`、`OPENVIKING_ACCOUNT`、`OPENVIKING_USER`、`OPENVIKING_PEER_ID`、`OPENVIKING_PEER_ID_MODE`
 优先级高于 `openviking-config.json` 里的同名配置。
-`OPENVIKING_AGENT_ID_MODE` 可以覆盖 `agentIdMode`。
 
 高级场景可以用 `OPENVIKING_PLUGIN_CONFIG` 指向其他配置文件路径。
 
@@ -215,7 +210,10 @@ memadd path="file:///home/alice/project/notes.md" reason="project notes"
 可能包含：
 
 - `openviking-memory.log`
-- `openviking-session-map.json`
+- `openviking-memory.YYYYMMDD-HHMMSS.log` 启动日志备份
+- `openviking-sessions/`
+
+如果发现旧的 `openviking-session-map.json`，插件会备份为 `openviking-session-map.v1-backup-YYYYMMDD-HHMMSS.json`，然后使用 `openviking-sessions/`；旧 map 内容不会迁移。
 
 可以通过配置里的 `runtime.dataDir` 修改这个目录。
 

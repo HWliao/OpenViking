@@ -1,110 +1,235 @@
 import fs from "fs"
 import path from "path"
 import {
-  log,
+  buildOpenVikingSessionId,
+  deriveAutoPeerId,
   effectivePeerId,
+  isValidPeerId,
+  log,
   makeRequest,
+  normalizeIdentifierPart,
+  resolveFixedPeerId,
+  resolveSafeOpenCodeSessionId,
   safeStringify,
   unwrapResponse,
-  withAgentId,
 } from "./utils.mjs"
 
 const MAX_BUFFERED_MESSAGES_PER_SESSION = 100
 const BUFFERED_MESSAGE_TTL_MS = 15 * 60 * 1000
 const BUFFER_CLEANUP_INTERVAL_MS = 30 * 1000
 const COMMIT_WAIT_TIMEOUT_MS = 180000
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000
+const STALE_FINALIZING_MS = 10 * 60 * 1000
 
-export function createMemorySessionManager({ config, pluginRoot }) {
+export function createMemorySessionManager({ config, pluginRoot, client }) {
   const sessionMap = new Map()
   const sessionMessageBuffer = new Map()
   const commitWatchers = new Map()
-  let sessionMapPath = path.join(pluginRoot, "openviking-session-map.json")
-  let saveTimer = null
+  const sessionSaveTimers = new Map()
+  const oldSessionMapPath = path.join(pluginRoot, "openviking-session-map.json")
+  const stateRoot = path.join(pluginRoot, "openviking-sessions")
+  const statePaths = {
+    root: stateRoot,
+    meta: path.join(stateRoot, "meta.json"),
+    projects: path.join(stateRoot, "projects"),
+    sessions: path.join(stateRoot, "sessions"),
+    finalizing: path.join(stateRoot, "finalizing"),
+    abandoned: path.join(stateRoot, "abandoned"),
+  }
+  let persistenceEnabled = true
+  let persistenceWarningEmitted = false
   let lastBufferCleanupAt = 0
 
   async function init() {
-    await loadSessionMap()
+    await initializeStateDirectory()
+    await backupLegacySessionMap()
+    await recoverStaleFinalizingFiles()
+    await loadSessionStates()
+    await finalizeExpiredSessions()
     resumeBackgroundCommits()
   }
 
-  async function loadSessionMap() {
+  async function initializeStateDirectory() {
     try {
-      if (!fs.existsSync(sessionMapPath)) {
-        log("INFO", "persistence", "No session map file found, starting fresh")
-        return
+      for (const dir of [statePaths.root, statePaths.projects, statePaths.sessions, statePaths.finalizing, statePaths.abandoned]) {
+        await fs.promises.mkdir(dir, { recursive: true })
       }
-      const data = JSON.parse(await fs.promises.readFile(sessionMapPath, "utf8"))
-      if (data.version !== 1) {
-        log("ERROR", "persistence", "Unsupported session map version", { version: data.version })
-        return
+      if (!fs.existsSync(statePaths.meta)) {
+        await fs.promises.writeFile(statePaths.meta, JSON.stringify({ version: 1, createdAt: Date.now() }, null, 2), "utf8")
       }
-      for (const [opencodeSessionId, persisted] of Object.entries(data.sessions ?? {})) {
-        sessionMap.set(opencodeSessionId, deserializeSessionMapping(persisted))
-      }
-      log("INFO", "persistence", "Session map loaded", { count: sessionMap.size })
     } catch (error) {
-      log("ERROR", "persistence", "Failed to load session map", { error: error?.message })
-      if (fs.existsSync(sessionMapPath)) {
-        await fs.promises.rename(sessionMapPath, `${sessionMapPath}.corrupted.${Date.now()}`)
-      }
+      persistenceEnabled = false
+      warnPersistenceDegraded(error)
     }
   }
 
-  async function saveSessionMap() {
+  function warnPersistenceDegraded(error) {
+    if (persistenceWarningEmitted) return
+    persistenceWarningEmitted = true
+    log("WARN", "persistence", "OpenViking session state persistence disabled; pending messages and routing state will be lost on process exit", {
+      error: error?.message,
+    })
+  }
+
+  async function backupLegacySessionMap() {
     try {
-      const sessions = {}
-      for (const [opencodeSessionId, mapping] of sessionMap.entries()) {
-        sessions[opencodeSessionId] = serializeSessionMapping(mapping)
-      }
-      const tempPath = `${sessionMapPath}.tmp`
-      await fs.promises.writeFile(tempPath, JSON.stringify({ version: 1, sessions, lastSaved: Date.now() }, null, 2), "utf8")
-      await fs.promises.rename(tempPath, sessionMapPath)
-      log("DEBUG", "persistence", "Session map saved", { count: sessionMap.size })
+      if (!fs.existsSync(oldSessionMapPath)) return
+      await fs.promises.rename(oldSessionMapPath, nextLegacyBackupPath())
+      log("WARN", "persistence", "Backed up legacy session map without migrating contents")
     } catch (error) {
-      log("ERROR", "persistence", "Failed to save session map", { error: error?.message })
+      log("WARN", "persistence", "Failed to back up legacy session map; continuing with split state", { error: error?.message })
     }
   }
 
-  function debouncedSaveSessionMap() {
-    if (saveTimer) clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => {
-      saveSessionMap().catch((error) => {
-        log("ERROR", "persistence", "Debounced save failed", { error: error?.message })
-      })
-    }, 300)
+  function nextLegacyBackupPath() {
+    const parsed = path.parse(oldSessionMapPath)
+    const timestamp = formatTimestamp(new Date())
+    for (let index = 0; index < 100; index += 1) {
+      const suffix = index === 0 ? "" : `-${index}`
+      const candidate = path.join(parsed.dir, `${parsed.name}.v1-backup-${timestamp}${suffix}${parsed.ext}`)
+      if (!fs.existsSync(candidate)) return candidate
+    }
+    return path.join(parsed.dir, `${parsed.name}.v1-backup-${timestamp}-${process.pid}${parsed.ext}`)
   }
 
-  function serializeSessionMapping(mapping) {
+  async function loadSessionStates() {
+    if (!persistenceEnabled) return
+    let files = []
+    try {
+      files = await fs.promises.readdir(statePaths.sessions)
+    } catch (error) {
+      warnPersistenceDegraded(error)
+      return
+    }
+
+    for (const file of files.filter((name) => name.endsWith(".json"))) {
+      const filePath = path.join(statePaths.sessions, file)
+      try {
+        const state = JSON.parse(await fs.promises.readFile(filePath, "utf8"))
+        const mapping = deserializeSessionState(state)
+        sessionMap.set(mapping.openCodeSessionId, mapping)
+      } catch (error) {
+        log("WARN", "persistence", "Bad session state JSON moved to abandoned", { file, error: error?.message })
+        await moveFileToAbandoned(filePath, file)
+      }
+    }
+    log("INFO", "persistence", "Session states loaded", { count: sessionMap.size })
+  }
+
+  function serializeSessionState(mapping, extra = {}) {
     return {
+      version: 1,
+      openCodeSessionId: mapping.openCodeSessionId,
+      safeOpenCodeSessionId: mapping.safeOpenCodeSessionId,
+      projectID: mapping.projectID,
+      safeProjectId: mapping.safeProjectId,
+      peerId: mapping.peerId,
       ovSessionId: mapping.ovSessionId,
-      agentId: mapping.agentId,
       createdAt: mapping.createdAt,
+      updatedAt: mapping.updatedAt,
+      lastSeenAt: mapping.lastSeenAt,
+      expiresAt: mapping.expiresAt,
       capturedMessages: Array.from(mapping.capturedMessages),
       messageRoles: Array.from(mapping.messageRoles.entries()),
       pendingMessages: Array.from(mapping.pendingMessages.entries()),
-      lastCommitTime: mapping.lastCommitTime,
-      commitInFlight: mapping.commitInFlight,
-      commitTaskId: mapping.commitTaskId,
-      commitStartedAt: mapping.commitStartedAt,
-      pendingCleanup: mapping.pendingCleanup,
+      commit: {
+        lastCommitTime: mapping.commit.lastCommitTime ?? null,
+        inFlight: Boolean(mapping.commit.inFlight),
+        taskId: mapping.commit.taskId ?? null,
+        startedAt: mapping.commit.startedAt ?? null,
+        pendingCleanup: Boolean(mapping.commit.pendingCleanup),
+      },
+      ...extra,
     }
   }
 
-  function deserializeSessionMapping(persisted) {
+  function deserializeSessionState(state) {
+    const now = Date.now()
+    const safeOpenCodeSessionId = state.safeOpenCodeSessionId || resolveSafeOpenCodeSessionId(state.openCodeSessionId, now)
     return {
-      ovSessionId: persisted.ovSessionId,
-      agentId: persisted.agentId,
-      createdAt: persisted.createdAt,
-      capturedMessages: new Set(persisted.capturedMessages ?? []),
-      messageRoles: new Map(persisted.messageRoles ?? []),
-      pendingMessages: new Map(persisted.pendingMessages ?? []),
+      openCodeSessionId: state.openCodeSessionId || safeOpenCodeSessionId,
+      safeOpenCodeSessionId,
+      projectID: state.projectID,
+      safeProjectId: state.safeProjectId,
+      peerId: isValidPeerId(state.peerId) ? String(state.peerId).trim() : null,
+      ovSessionId: state.ovSessionId || buildOpenVikingSessionId({ peerId: state.peerId, openCodeSessionId: state.openCodeSessionId, now }).ovSessionId,
+      createdAt: state.createdAt ?? now,
+      updatedAt: state.updatedAt ?? now,
+      lastSeenAt: state.lastSeenAt ?? state.updatedAt ?? now,
+      expiresAt: state.expiresAt ?? ((state.lastSeenAt ?? now) + SESSION_TTL_MS),
+      capturedMessages: new Set(state.capturedMessages ?? []),
+      messageRoles: new Map(state.messageRoles ?? []),
+      pendingMessages: new Map(state.pendingMessages ?? []),
       sendingMessages: new Set(),
-      lastCommitTime: persisted.lastCommitTime,
-      commitInFlight: persisted.commitInFlight,
-      commitTaskId: persisted.commitTaskId,
-      commitStartedAt: persisted.commitStartedAt,
-      pendingCleanup: persisted.pendingCleanup,
+      commit: {
+        lastCommitTime: state.commit?.lastCommitTime ?? state.lastCommitTime ?? null,
+        inFlight: Boolean(state.commit?.inFlight ?? state.commitInFlight),
+        taskId: state.commit?.taskId ?? state.commitTaskId ?? null,
+        startedAt: state.commit?.startedAt ?? state.commitStartedAt ?? null,
+        pendingCleanup: Boolean(state.commit?.pendingCleanup ?? state.pendingCleanup),
+      },
     }
+  }
+
+  async function saveSessionState(mapping, { touch = true } = {}) {
+    if (touch) touchMapping(mapping)
+    sessionMap.set(mapping.openCodeSessionId, mapping)
+    if (!persistenceEnabled) return
+    const filePath = getSessionStatePath(mapping.safeOpenCodeSessionId)
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
+    try {
+      await fs.promises.writeFile(tempPath, JSON.stringify(serializeSessionState(mapping), null, 2), "utf8")
+      await fs.promises.rename(tempPath, filePath)
+    } catch (error) {
+      await rmQuiet(tempPath)
+      warnPersistenceDegraded(error)
+    }
+  }
+
+  function debouncedSaveSessionState(mapping) {
+    const key = mapping.safeOpenCodeSessionId
+    const existing = sessionSaveTimers.get(key)
+    if (existing) clearTimeout(existing.timer)
+    const timer = setTimeout(() => {
+      sessionSaveTimers.delete(key)
+      saveSessionState(mapping).catch((error) => {
+        log("ERROR", "persistence", "Debounced session state save failed", { error: error?.message })
+      })
+    }, 300)
+    timer.unref?.()
+    sessionSaveTimers.set(key, { timer, mapping })
+  }
+
+  function clearDebouncedSessionSave(mapping) {
+    const existing = sessionSaveTimers.get(mapping.safeOpenCodeSessionId)
+    if (!existing) return
+    clearTimeout(existing.timer)
+    sessionSaveTimers.delete(mapping.safeOpenCodeSessionId)
+  }
+
+  async function flushDebouncedSessionSaves({ touch = false } = {}) {
+    const pending = Array.from(sessionSaveTimers.values())
+    sessionSaveTimers.clear()
+    for (const entry of pending) {
+      clearTimeout(entry.timer)
+      await saveSessionState(entry.mapping, { touch })
+    }
+  }
+
+  async function deleteSessionState(mapping) {
+    clearDebouncedSessionSave(mapping)
+    sessionMap.delete(mapping.openCodeSessionId)
+    sessionMessageBuffer.delete(mapping.openCodeSessionId)
+    if (!persistenceEnabled) return
+    await rmQuiet(getSessionStatePath(mapping.safeOpenCodeSessionId))
+  }
+
+  function getSessionStatePath(safeOpenCodeSessionId) {
+    return path.join(statePaths.sessions, `${safeOpenCodeSessionId}.json`)
+  }
+
+  function getProjectStatePath(safeProjectId) {
+    return path.join(statePaths.projects, `${safeProjectId}.json`)
   }
 
   function getMappedSessionId(opencodeSessionId) {
@@ -112,11 +237,12 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   function getMappedAgentId(opencodeSessionId) {
-    return sessionMap.get(opencodeSessionId)?.agentId
+    return sessionMap.get(opencodeSessionId)?.peerId
   }
 
   function getRequestConfig(opencodeSessionId) {
-    return withAgentId(config, getMappedAgentId(opencodeSessionId))
+    const peerId = sessionMap.get(opencodeSessionId)?.peerId ?? effectivePeerId(config)
+    return peerId ? { ...config, peerId } : config
   }
 
   async function handleEvent(event) {
@@ -145,19 +271,24 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     }
 
     const existing = sessionMap.get(sessionId)
-    const agentId = resolveSessionCreatedAgentId(event, existing)
-    if (config.agentIdMode === "auto" && !agentId) {
-      log("DEBUG", "event", "session.created event info", {
-        properties: event?.properties,
-        info: event?.properties?.info,
-      })
-    }
-    const ovSessionId = await ensureOpenVikingSession(sessionId, agentId)
+    const peerContext = await resolvePeerContext(sessionId, event, existing)
+    const sessionIds = buildOpenVikingSessionId({ peerId: peerContext.peerId, openCodeSessionId: sessionId })
+    const ovSessionId = await ensureOpenVikingSession(sessionIds.ovSessionId, peerContext.peerId)
     if (!ovSessionId) return
 
-    const mapping = existing ?? createSessionMapping(ovSessionId, agentId)
+    const mapping = existing ?? createSessionMapping({
+      openCodeSessionId: sessionId,
+      safeOpenCodeSessionId: sessionIds.safeOpenCodeSessionId,
+      ovSessionId,
+      peerId: peerContext.peerId,
+      projectID: peerContext.projectID,
+      safeProjectId: peerContext.safeProjectId,
+    })
+    mapping.safeOpenCodeSessionId = sessionIds.safeOpenCodeSessionId
     mapping.ovSessionId = ovSessionId
-    mapping.agentId = agentId
+    mapping.peerId = peerContext.peerId
+    mapping.projectID = peerContext.projectID
+    mapping.safeProjectId = peerContext.safeProjectId
     sessionMap.set(sessionId, mapping)
 
     const bufferedMessages = sessionMessageBuffer.get(sessionId)
@@ -175,13 +306,165 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       await flushPendingMessages(sessionId, mapping)
     }
 
-    debouncedSaveSessionMap()
+    await saveSessionState(mapping)
     log("INFO", "event", "Session mapping established", {
       opencode_session: sessionId,
       openviking_session: ovSessionId,
-      agent_id: agentId || config.agentId || "default",
-      agent_id_source: getAgentIdSource(agentId, event, existing),
+      peer_id: peerContext.peerId ?? "none",
+      peer_id_source: peerContext.source,
     })
+  }
+
+  async function resolvePeerContext(sessionId, event, existing) {
+    const eventSession = event?.properties?.info ?? {}
+    const sdkSession = await fetchOpenCodeSession(sessionId, eventSession.directory)
+    const session = { ...sdkSession, ...eventSession }
+    const project = await fetchOpenCodeProject(session.directory)
+    const projectID = session.projectID ?? project?.id
+    const safeProjectId = normalizeIdentifierPart(projectID)
+
+    if (config.peerIdMode === "fixed") {
+      const fixed = resolveFixedPeerId(config).peerId
+      if (!fixed) {
+        log("WARN", "session", "peerIdMode=fixed requires a valid peerId; peer propagation disabled")
+      }
+      return { peerId: fixed, projectID, safeProjectId, source: fixed ? "fixed" : "none" }
+    }
+
+    if (safeProjectId.length >= 8) {
+      const projectState = await readProjectState(safeProjectId)
+      if (isValidPeerId(projectState?.peerId)) {
+        return { peerId: String(projectState.peerId).trim(), projectID, safeProjectId, source: "project-file" }
+      }
+
+      const previousPeerIds = Array.isArray(projectState?.previousPeerIds) ? [...projectState.previousPeerIds] : []
+      if (projectState?.peerId && !isValidPeerId(projectState.peerId)) {
+        log("WARN", "session", "Discarding invalid cached project peerId", { safeProjectId, peerId: projectState.peerId })
+        previousPeerIds.push(projectState.peerId)
+      }
+
+      const derived = deriveAutoPeerId({ project, session, projectID })
+      if (isValidPeerId(derived.peerId)) {
+        const state = await writeProjectState(safeProjectId, {
+          version: 1,
+          projectID,
+          safeProjectId,
+          peerId: derived.peerId,
+          previousPeerIds: [...new Set(previousPeerIds)].filter(Boolean),
+          createdAt: projectState?.createdAt ?? Date.now(),
+          updatedAt: Date.now(),
+        })
+        return { peerId: state.peerId, projectID, safeProjectId, source: "auto" }
+      }
+    }
+
+    if (isValidPeerId(existing?.peerId)) return { peerId: existing.peerId, projectID, safeProjectId, source: "session-state" }
+    const explicit = effectivePeerId(config)
+    if (explicit) return { peerId: explicit, projectID, safeProjectId, source: "explicit-fallback" }
+    return { peerId: null, projectID, safeProjectId, source: "none" }
+  }
+
+  async function fetchOpenCodeSession(sessionId, directory) {
+    if (typeof client?.session?.get !== "function") return null
+    try {
+      const result = await client.session.get({
+        path: { id: sessionId },
+        query: directory ? { directory } : undefined,
+      })
+      return unwrapClientResult(result)
+    } catch (error) {
+      log("WARN", "session", "Failed to query OpenCode session for peer derivation", { session_id: sessionId, error: error?.message })
+      return null
+    }
+  }
+
+  async function fetchOpenCodeProject(directory) {
+    if (typeof client?.project?.current !== "function") return null
+    try {
+      const result = await client.project.current({ query: directory ? { directory } : undefined })
+      return unwrapClientResult(result)
+    } catch (error) {
+      log("WARN", "session", "Failed to query OpenCode project for peer derivation", { directory, error: error?.message })
+      return null
+    }
+  }
+
+  function unwrapClientResult(result) {
+    return result?.data ?? result?.result ?? result
+  }
+
+  async function readProjectState(safeProjectId) {
+    if (!persistenceEnabled || safeProjectId.length < 8) return null
+    const filePath = getProjectStatePath(safeProjectId)
+    try {
+      if (!fs.existsSync(filePath)) return null
+      return JSON.parse(await fs.promises.readFile(filePath, "utf8"))
+    } catch (error) {
+      log("WARN", "persistence", "Bad project state JSON moved to abandoned", { safeProjectId, error: error?.message })
+      await moveFileToAbandoned(filePath, `project-${safeProjectId}.json`)
+      return null
+    }
+  }
+
+  async function writeProjectState(safeProjectId, state) {
+    if (!persistenceEnabled || safeProjectId.length < 8) return state
+    const filePath = getProjectStatePath(safeProjectId)
+    const json = JSON.stringify(state, null, 2)
+    try {
+      if (!fs.existsSync(filePath)) {
+        try {
+          await fs.promises.writeFile(filePath, json, { encoding: "utf8", flag: "wx" })
+          return state
+        } catch (error) {
+          if (error?.code !== "EEXIST") throw error
+        }
+      }
+
+      const existing = await readProjectState(safeProjectId)
+      if (isValidPeerId(existing?.peerId)) return existing
+
+      const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
+      await fs.promises.writeFile(tempPath, json, "utf8")
+      await fs.promises.rename(tempPath, filePath)
+      return state
+    } catch (error) {
+      log("WARN", "persistence", "Failed to write project peer state", { safeProjectId, error: error?.message })
+      return state
+    }
+  }
+
+  async function ensureOpenVikingSession(ovSessionId, peerId) {
+    try {
+      const response = await makeRequest(config, {
+        method: "GET",
+        endpoint: `/api/v1/sessions/${encodeURIComponent(ovSessionId)}`,
+        timeoutMs: 5000,
+        actorPeerId: peerId,
+      })
+      if (unwrapResponse(response)) return ovSessionId
+    } catch (error) {
+      log("INFO", "session", "OpenViking session unavailable, creating it", {
+        openviking_session: ovSessionId,
+        error: error?.message,
+      })
+    }
+
+    try {
+      const response = await makeRequest(config, {
+        method: "POST",
+        endpoint: "/api/v1/sessions",
+        body: { session_id: ovSessionId },
+        timeoutMs: 5000,
+        actorPeerId: peerId,
+      })
+      return unwrapResponse(response)?.session_id ?? ovSessionId
+    } catch (error) {
+      log("ERROR", "session", "Failed to create OpenViking session", {
+        openviking_session: ovSessionId,
+        error: error?.message,
+      })
+      return null
+    }
   }
 
   async function handleSessionDeleted(event) {
@@ -191,18 +474,19 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     const mapping = sessionMap.get(sessionId)
     if (!mapping) {
       sessionMessageBuffer.delete(sessionId)
+      await finalizeExpiredSessions()
       return
     }
 
     await flushPendingMessages(sessionId, mapping)
-    if (mapping.capturedMessages.size > 0 || mapping.commitInFlight) {
-      mapping.pendingCleanup = true
-      if (!mapping.commitInFlight) await startBackgroundCommit(mapping, sessionId)
+    if (mapping.capturedMessages.size > 0 || mapping.commit.inFlight) {
+      mapping.commit.pendingCleanup = true
+      await saveSessionState(mapping)
+      if (!mapping.commit.inFlight) await startBackgroundCommit(mapping, sessionId)
     } else {
-      sessionMap.delete(sessionId)
-      sessionMessageBuffer.delete(sessionId)
-      await saveSessionMap()
+      await deleteSessionState(mapping)
     }
+    await finalizeExpiredSessions()
   }
 
   async function handleSessionError(event) {
@@ -214,6 +498,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
   async function handleSessionCompacted(event) {
     await commitSessionBoundary(event, "session.compacted")
+    await finalizeExpiredSessions()
   }
 
   async function commitSessionBoundary(event, reason) {
@@ -224,7 +509,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     if (!mapping) return
 
     await flushPendingMessages(sessionId, mapping)
-    if (mapping.commitInFlight) {
+    if (mapping.commit.inFlight) {
       monitorBackgroundCommit(mapping, sessionId)
       return
     }
@@ -259,7 +544,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     } else if (role === "assistant" && finish === "stop") {
       mapping.messageRoles.set(messageId, role)
     }
-
+    await saveSessionState(mapping)
     await flushPendingMessages(sessionId, mapping)
   }
 
@@ -271,6 +556,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     const messageId = part.messageID
     if (!sessionId || !messageId || part.type !== "text" || !part.text?.trim()) return
 
+
     const mapping = sessionMap.get(sessionId)
     if (!mapping) {
       upsertBufferedMessage(sessionId, messageId, { content: part.text })
@@ -279,49 +565,12 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
     if (mapping.capturedMessages.has(messageId)) return
     mapping.pendingMessages.set(messageId, mergeMessageContent(mapping.pendingMessages.get(messageId), part.text))
+    debouncedSaveSessionState(mapping)
   }
 
-  async function ensureOpenVikingSession(opencodeSessionId, agentId) {
-    const knownSessionId = sessionMap.get(opencodeSessionId)?.ovSessionId
-    const requestConfig = withAgentId(config, agentId || sessionMap.get(opencodeSessionId)?.agentId)
-    if (knownSessionId) {
-      try {
-        const response = await makeRequest(requestConfig, {
-          method: "GET",
-          endpoint: `/api/v1/sessions/${encodeURIComponent(knownSessionId)}`,
-          timeoutMs: 5000,
-        })
-        if (unwrapResponse(response)) return knownSessionId
-      } catch (error) {
-        log("INFO", "session", "Persisted OpenViking session unavailable, creating a new one", {
-          opencode_session: opencodeSessionId,
-          openviking_session: knownSessionId,
-          error: error?.message,
-        })
-      }
-    }
-
-    try {
-      const response = await makeRequest(requestConfig, {
-        method: "POST",
-        endpoint: "/api/v1/sessions",
-        body: {},
-        timeoutMs: 5000,
-      })
-      const sessionId = unwrapResponse(response)?.session_id
-      if (!sessionId) throw new Error("OpenViking did not return a session_id")
-      return sessionId
-    } catch (error) {
-      log("ERROR", "session", "Failed to create OpenViking session", {
-        opencode_session: opencodeSessionId,
-        error: error?.message,
-      })
-      return null
-    }
-  }
-
-  async function flushPendingMessages(opencodeSessionId, mapping) {
-    if (mapping.commitInFlight) return
+  async function flushPendingMessages(opencodeSessionId, mapping, { persist = true } = {}) {
+    if (mapping.commit.inFlight) return true
+    let allSucceeded = true
 
     for (const messageId of Array.from(mapping.pendingMessages.keys())) {
       if (mapping.capturedMessages.has(messageId) || mapping.sendingMessages.has(messageId)) continue
@@ -334,29 +583,31 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         const success = await addMessageToSession(mapping, role, content)
         if (success) {
           const latest = mapping.pendingMessages.get(messageId)
-          if (latest && latest !== content) {
-            continue
-          }
+          if (latest && latest !== content) continue
           mapping.pendingMessages.delete(messageId)
           mapping.capturedMessages.add(messageId)
-          debouncedSaveSessionMap()
+          if (persist) await saveSessionState(mapping)
+        } else {
+          allSucceeded = false
         }
       } finally {
         mapping.sendingMessages.delete(messageId)
       }
     }
+
+    return allSucceeded
   }
 
   async function addMessageToSession(mapping, role, content) {
     try {
       const body = { role, content }
-      const peerId = effectivePeerId(config)
-      if (peerId) body.peer_id = peerId
-      const response = await makeRequest(getMappingConfig(mapping), {
+      if (isValidPeerId(mapping.peerId)) body.peer_id = mapping.peerId
+      const response = await makeRequest(config, {
         method: "POST",
         endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/messages`,
         body,
         timeoutMs: 5000,
+        actorPeerId: mapping.peerId,
       })
       unwrapResponse(response)
       return true
@@ -371,17 +622,18 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   async function startBackgroundCommit(mapping, opencodeSessionId, abortSignal) {
-    if (mapping.commitInFlight && mapping.commitTaskId) {
+    if (mapping.commit.inFlight && mapping.commit.taskId) {
       if (!abortSignal) monitorBackgroundCommit(mapping, opencodeSessionId)
-      return { mode: "background", taskId: mapping.commitTaskId }
+      return { mode: "background", taskId: mapping.commit.taskId }
     }
 
     try {
-      const response = await makeRequest(getMappingConfig(mapping), {
+      const response = await makeRequest(config, {
         method: "POST",
         endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/commit`,
         timeoutMs: 10000,
         abortSignal,
+        actorPeerId: mapping.peerId,
       })
       const result = unwrapResponse(response)
       const taskId = result?.task_id
@@ -391,20 +643,20 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         return { mode: "completed", result }
       }
 
-      mapping.commitInFlight = true
-      mapping.commitTaskId = taskId
-      mapping.commitStartedAt = Date.now()
-      debouncedSaveSessionMap()
+      mapping.commit.inFlight = true
+      mapping.commit.taskId = taskId
+      mapping.commit.startedAt = Date.now()
+      await saveSessionState(mapping)
       if (!abortSignal) monitorBackgroundCommit(mapping, opencodeSessionId)
       return { mode: "background", taskId }
     } catch (error) {
       if (error?.message?.includes("already has a commit in progress")) {
         const taskId = await findRunningCommitTaskId(mapping)
         if (taskId) {
-          mapping.commitInFlight = true
-          mapping.commitTaskId = taskId
-          mapping.commitStartedAt = mapping.commitStartedAt ?? Date.now()
-          debouncedSaveSessionMap()
+          mapping.commit.inFlight = true
+          mapping.commit.taskId = taskId
+          mapping.commit.startedAt = mapping.commit.startedAt ?? Date.now()
+          await saveSessionState(mapping)
           if (!abortSignal) monitorBackgroundCommit(mapping, opencodeSessionId)
           return { mode: "background", taskId }
         }
@@ -422,12 +674,12 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     const startedAt = Date.now()
     while (Date.now() - startedAt < timeoutMs) {
       if (abortSignal?.aborted) throw new Error("Operation aborted")
-      if (!mapping.commitInFlight) return null
-      if (!mapping.commitTaskId) {
-        mapping.commitTaskId = await findRunningCommitTaskId(mapping)
-        if (!mapping.commitTaskId) {
+      if (!mapping.commit.inFlight) return null
+      if (!mapping.commit.taskId) {
+        mapping.commit.taskId = await findRunningCommitTaskId(mapping)
+        if (!mapping.commit.taskId) {
           clearCommitState(mapping)
-          debouncedSaveSessionMap()
+          await saveSessionState(mapping)
           return null
         }
       }
@@ -439,7 +691,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       }
       if (task.status === "failed") {
         clearCommitState(mapping)
-        debouncedSaveSessionMap()
+        await saveSessionState(mapping)
         throw new Error(task.error || "Background commit failed")
       }
       await sleep(2000, abortSignal)
@@ -448,21 +700,23 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   async function getTask(mapping, abortSignal) {
-    const response = await makeRequest(getMappingConfig(mapping), {
+    const response = await makeRequest(config, {
       method: "GET",
-      endpoint: `/api/v1/tasks/${encodeURIComponent(mapping.commitTaskId)}`,
+      endpoint: `/api/v1/tasks/${encodeURIComponent(mapping.commit.taskId)}`,
       timeoutMs: 5000,
       abortSignal,
+      actorPeerId: mapping.peerId,
     })
     return unwrapResponse(response)
   }
 
   async function findRunningCommitTaskId(mapping) {
     try {
-      const response = await makeRequest(getMappingConfig(mapping), {
+      const response = await makeRequest(config, {
         method: "GET",
         endpoint: `/api/v1/tasks?task_type=session_commit&resource_id=${encodeURIComponent(mapping.ovSessionId)}&limit=10`,
         timeoutMs: 5000,
+        actorPeerId: mapping.peerId,
       })
       const tasks = unwrapResponse(response) ?? []
       return tasks.find((task) => task.status === "pending" || task.status === "running")?.task_id
@@ -473,31 +727,29 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   async function finalizeCommitSuccess(mapping, opencodeSessionId) {
-    mapping.lastCommitTime = Date.now()
+    mapping.commit.lastCommitTime = Date.now()
     mapping.capturedMessages.clear()
     clearCommitState(mapping)
-    debouncedSaveSessionMap()
+    await saveSessionState(mapping)
 
     await flushPendingMessages(opencodeSessionId, mapping)
 
-    if (mapping.pendingCleanup) {
-      sessionMap.delete(opencodeSessionId)
-      sessionMessageBuffer.delete(opencodeSessionId)
-      await saveSessionMap()
+    if (mapping.commit.pendingCleanup) {
+      await deleteSessionState(mapping)
     }
   }
 
   function resumeBackgroundCommits() {
     for (const [opencodeSessionId, mapping] of sessionMap.entries()) {
-      if (mapping.commitInFlight) monitorBackgroundCommit(mapping, opencodeSessionId)
+      if (mapping.commit.inFlight) monitorBackgroundCommit(mapping, opencodeSessionId)
     }
   }
 
   function monitorBackgroundCommit(mapping, opencodeSessionId) {
-    if (!mapping.commitTaskId) return
-    if (commitWatchers.has(mapping.commitTaskId)) return
+    if (!mapping.commit.taskId) return
+    if (commitWatchers.has(mapping.commit.taskId)) return
 
-    const taskId = mapping.commitTaskId
+    const taskId = mapping.commit.taskId
     const watcher = waitForCommitCompletion(mapping, opencodeSessionId)
       .then((task) => {
         if (!task) {
@@ -523,21 +775,20 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   async function flushAll({ commit = false } = {}) {
-    if (saveTimer) {
-      clearTimeout(saveTimer)
-      saveTimer = null
-    }
+    await flushDebouncedSessionSaves({ touch: false })
+    await finalizeExpiredSessions()
     for (const [sessionId, mapping] of sessionMap.entries()) {
+      if (isFinalizationDue(mapping)) continue
       await flushPendingMessages(sessionId, mapping)
       if (commit) {
-        if (mapping.commitInFlight) {
+        if (mapping.commit.inFlight) {
           monitorBackgroundCommit(mapping, sessionId)
         } else if (mapping.capturedMessages.size > 0) {
           await startBackgroundCommit(mapping, sessionId)
         }
       }
+      await saveSessionState(mapping)
     }
-    await saveSessionMap()
   }
 
   async function flushSession(opencodeSessionId, { commit = false, reason = "manual" } = {}) {
@@ -546,7 +797,7 @@ export function createMemorySessionManager({ config, pluginRoot }) {
 
     await flushPendingMessages(opencodeSessionId, mapping)
     if (commit) {
-      if (mapping.commitInFlight) {
+      if (mapping.commit.inFlight) {
         monitorBackgroundCommit(mapping, opencodeSessionId)
       } else if (mapping.capturedMessages.size > 0) {
         log("INFO", "session", "Committing OpenViking session at lifecycle boundary", {
@@ -557,31 +808,200 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         await startBackgroundCommit(mapping, opencodeSessionId)
       }
     }
-    await saveSessionMap()
+    await saveSessionState(mapping)
+    await finalizeExpiredSessions()
     return true
   }
 
   async function commitSession(sessionId, opencodeSessionId, abortSignal) {
-    const mapped = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
-    let mapping = mapped
-    if (!mapping || mapping.ovSessionId !== sessionId) {
-      mapping = createSessionMapping(sessionId, mapped?.agentId)
-    } else {
-      await flushPendingMessages(opencodeSessionId, mapping)
-    }
+    try {
+      const mapped = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
+      let mapping = mapped
+      if (!mapping || mapping.ovSessionId !== sessionId) {
+        mapping = createSessionMapping({
+          openCodeSessionId: opencodeSessionId ?? sessionId,
+          ovSessionId: sessionId,
+          peerId: mapped?.peerId ?? effectivePeerId(config),
+        })
+      } else {
+        await flushPendingMessages(opencodeSessionId, mapping)
+      }
 
-    if (mapping.commitInFlight) {
+      if (mapping.commit.inFlight) {
+        const task = await waitForCommitCompletion(mapping, opencodeSessionId ?? sessionId, abortSignal)
+        if (task?.status === "completed") return { status: "completed", task }
+      }
+
+      const start = await startBackgroundCommit(mapping, opencodeSessionId ?? sessionId, abortSignal)
+      if (!start) throw new Error("Failed to start OpenViking session commit")
+      if (start.mode === "completed") return { status: "completed", result: start.result }
+
       const task = await waitForCommitCompletion(mapping, opencodeSessionId ?? sessionId, abortSignal)
-      if (task?.status === "completed") return { status: "completed", task }
+      if (!task) return { status: "accepted", task_id: start.taskId }
+      return { status: task.status, task }
+    } finally {
+      await flushDebouncedSessionSaves({ touch: false })
+      await finalizeExpiredSessions()
+    }
+  }
+
+  async function finalizeExpiredSessions() {
+    const now = Date.now()
+    for (const mapping of Array.from(sessionMap.values())) {
+      if (!isFinalizationDue(mapping, now)) continue
+      await finalizeMapping(mapping)
+    }
+  }
+
+  function isFinalizationDue(mapping, now = Date.now()) {
+    return mapping.expiresAt <= now || Boolean(mapping.commit.pendingCleanup)
+  }
+
+  async function finalizeMapping(mapping) {
+    const claim = await claimFinalizing(mapping)
+    if (!claim) return
+
+    const pushSucceeded = await flushPendingMessages(mapping.openCodeSessionId, mapping, { persist: false })
+    if (!pushSucceeded) {
+      await restoreFinalizing(claim.path, mapping)
+      return
     }
 
-    const start = await startBackgroundCommit(mapping, opencodeSessionId ?? sessionId, abortSignal)
-    if (!start) throw new Error("Failed to start OpenViking session commit")
-    if (start.mode === "completed") return { status: "completed", result: start.result }
+    await writeFinalizingState(claim.path, mapping)
+    if (mapping.pendingMessages.size === 0 && mapping.capturedMessages.size === 0) {
+      await removeFinalizing(claim.path, mapping)
+      return
+    }
 
-    const task = await waitForCommitCompletion(mapping, opencodeSessionId ?? sessionId, abortSignal)
-    if (!task) return { status: "accepted", task_id: start.taskId }
-    return { status: task.status, task }
+    const commit = await triggerFinalizationCommit(mapping)
+    if (commit.transportFailure) {
+      await restoreFinalizing(claim.path, mapping)
+      return
+    }
+    await removeFinalizing(claim.path, mapping)
+  }
+
+  async function claimFinalizing(mapping) {
+    clearDebouncedSessionSave(mapping)
+    sessionMap.delete(mapping.openCodeSessionId)
+    if (!persistenceEnabled) return { path: null }
+    await saveSessionState(mapping, { touch: false })
+    sessionMap.delete(mapping.openCodeSessionId)
+    const source = getSessionStatePath(mapping.safeOpenCodeSessionId)
+    const target = path.join(statePaths.finalizing, `${mapping.safeOpenCodeSessionId}.${process.pid}.${Date.now()}.json`)
+    try {
+      await fs.promises.rename(source, target)
+      await writeFinalizingState(target, mapping)
+      return { path: target }
+    } catch (error) {
+      log("DEBUG", "session", "Skipped finalization because claim failed", { session: mapping.safeOpenCodeSessionId, error: error?.message })
+      sessionMap.set(mapping.openCodeSessionId, mapping)
+      return null
+    }
+  }
+
+  async function triggerFinalizationCommit(mapping) {
+    try {
+      const response = await makeRequest(config, {
+        method: "POST",
+        endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/commit`,
+        timeoutMs: 10000,
+        actorPeerId: mapping.peerId,
+      })
+      unwrapResponse(response)
+      return { transportFailure: false }
+    } catch (error) {
+      if (isTransportFailure(error)) {
+        log("WARN", "session", "Finalization commit transport failure; keeping state for retry", { error: error?.message })
+        return { transportFailure: true }
+      }
+      log("WARN", "session", "Finalization commit received server error; deleting local state", { error: error?.message })
+      return { transportFailure: false }
+    }
+  }
+
+  function isTransportFailure(error) {
+    const message = String(error?.message ?? "")
+    return message.includes("fetch failed")
+      || message.includes("service unavailable")
+      || message.includes("Request timeout")
+      || message.includes("ECONNREFUSED")
+      || error?.name === "AbortError"
+  }
+
+  async function writeFinalizingState(filePath, mapping) {
+    if (!filePath) return
+    await fs.promises.writeFile(filePath, JSON.stringify(serializeSessionState(mapping, { claimedAt: Date.now() }), null, 2), "utf8")
+  }
+
+  async function restoreFinalizing(filePath, mapping) {
+    sessionMap.set(mapping.openCodeSessionId, mapping)
+    if (!filePath || !persistenceEnabled) return saveSessionState(mapping, { touch: false })
+    await writeFinalizingState(filePath, mapping)
+    const activePath = getSessionStatePath(mapping.safeOpenCodeSessionId)
+    if (fs.existsSync(activePath)) {
+      await resolveActiveFinalizingConflict(activePath, filePath, mapping)
+      return
+    }
+    await fs.promises.rename(filePath, activePath)
+  }
+
+  async function removeFinalizing(filePath, mapping) {
+    clearDebouncedSessionSave(mapping)
+    sessionMap.delete(mapping.openCodeSessionId)
+    sessionMessageBuffer.delete(mapping.openCodeSessionId)
+    if (filePath) await rmQuiet(filePath)
+  }
+
+  async function recoverStaleFinalizingFiles() {
+    if (!persistenceEnabled) return
+    let files = []
+    try {
+      files = await fs.promises.readdir(statePaths.finalizing)
+    } catch {
+      return
+    }
+
+    const now = Date.now()
+    for (const file of files.filter((name) => name.endsWith(".json"))) {
+      const filePath = path.join(statePaths.finalizing, file)
+      try {
+        const stat = await fs.promises.stat(filePath)
+        const state = JSON.parse(await fs.promises.readFile(filePath, "utf8"))
+        const claimedAt = Number(state.claimedAt || stat.mtimeMs)
+        if (now - claimedAt < STALE_FINALIZING_MS) continue
+        const mapping = deserializeSessionState(state)
+        const activePath = getSessionStatePath(mapping.safeOpenCodeSessionId)
+        if (fs.existsSync(activePath)) {
+          await resolveActiveFinalizingConflict(activePath, filePath, mapping)
+        } else {
+          await fs.promises.rename(filePath, activePath)
+          sessionMap.set(mapping.openCodeSessionId, mapping)
+        }
+      } catch (error) {
+        log("WARN", "persistence", "Failed to recover finalizing state", { file, error: error?.message })
+        await moveFileToAbandoned(filePath, file)
+      }
+    }
+  }
+
+  async function resolveActiveFinalizingConflict(activePath, finalizingPath, finalizingMapping) {
+    try {
+      const active = deserializeSessionState(JSON.parse(await fs.promises.readFile(activePath, "utf8")))
+      const activeTime = Math.max(active.lastSeenAt ?? 0, active.updatedAt ?? 0)
+      const finalizingTime = Math.max(finalizingMapping.lastSeenAt ?? 0, finalizingMapping.updatedAt ?? 0)
+      if (activeTime >= finalizingTime) {
+        await moveFileToAbandoned(finalizingPath, path.basename(finalizingPath))
+        sessionMap.set(active.openCodeSessionId, active)
+      } else {
+        await moveFileToAbandoned(activePath, path.basename(activePath))
+        await fs.promises.rename(finalizingPath, activePath)
+        sessionMap.set(finalizingMapping.openCodeSessionId, finalizingMapping)
+      }
+    } catch (error) {
+      log("WARN", "persistence", "Failed to resolve finalizing conflict", { error: error?.message })
+      await moveFileToAbandoned(finalizingPath, path.basename(finalizingPath))
+    }
   }
 
   return {
@@ -595,17 +1015,31 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     flushSession,
   }
 
-  function createSessionMapping(ovSessionId, agentId) {
+  function createSessionMapping({ openCodeSessionId, safeOpenCodeSessionId, ovSessionId, peerId, projectID, safeProjectId }) {
+    const now = Date.now()
+    const safeSessionId = safeOpenCodeSessionId || resolveSafeOpenCodeSessionId(openCodeSessionId, now)
     return {
-      ovSessionId,
-      agentId,
-      createdAt: Date.now(),
+      openCodeSessionId,
+      safeOpenCodeSessionId: safeSessionId,
+      projectID,
+      safeProjectId,
+      peerId: isValidPeerId(peerId) ? String(peerId).trim() : null,
+      ovSessionId: ovSessionId ?? buildOpenVikingSessionId({ peerId, openCodeSessionId, now }).ovSessionId,
+      createdAt: now,
+      updatedAt: now,
+      lastSeenAt: now,
+      expiresAt: now + SESSION_TTL_MS,
       capturedMessages: new Set(),
       messageRoles: new Map(),
       pendingMessages: new Map(),
       sendingMessages: new Set(),
-      lastCommitTime: undefined,
-      commitInFlight: false,
+      commit: {
+        lastCommitTime: null,
+        inFlight: false,
+        taskId: null,
+        startedAt: null,
+        pendingCleanup: false,
+      },
     }
   }
 
@@ -613,32 +1047,11 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     return event?.properties?.info?.id ?? event?.properties?.sessionID ?? event?.properties?.sessionId
   }
 
-  function resolveSessionCreatedAgentId(event, existingMapping) {
-    if (config.agentIdMode !== "auto") return undefined
-    const info = event?.properties?.info
-    return safeAgentIdFromCwd(info?.cwd) || safeAgentIdFromCwd(info?.directory) || existingMapping?.agentId || config.agentId || undefined
-  }
-
-  function safeAgentIdFromCwd(cwd) {
-    if (typeof cwd !== "string") return ""
-    return path.normalize(cwd.trim())
-      .replace(/[^A-Za-z0-9._-]+/g, "_")
-      .replace(/_+/g, "_")
-      .replace(/^_+|_+$/g, "")
-  }
-
-  function getAgentIdSource(agentId, event, existingMapping) {
-    const info = event?.properties?.info
-    if (!agentId) return config.agentId ? "config" : "server-default"
-    if (safeAgentIdFromCwd(info?.cwd) === agentId) return "cwd"
-    if (safeAgentIdFromCwd(info?.directory) === agentId) return "directory"
-    if (existingMapping?.agentId === agentId) return "session-map"
-    if (config.agentId === agentId) return "config"
-    return "unknown"
-  }
-
-  function getMappingConfig(mapping) {
-    return withAgentId(config, mapping?.agentId)
+  function touchMapping(mapping) {
+    const now = Date.now()
+    mapping.updatedAt = now
+    mapping.lastSeenAt = now
+    mapping.expiresAt = now + SESSION_TTL_MS
   }
 
   function mergeMessageContent(existing, incoming) {
@@ -686,9 +1099,29 @@ export function createMemorySessionManager({ config, pluginRoot }) {
   }
 
   function clearCommitState(mapping) {
-    mapping.commitInFlight = false
-    mapping.commitTaskId = undefined
-    mapping.commitStartedAt = undefined
+    mapping.commit.inFlight = false
+    mapping.commit.taskId = null
+    mapping.commit.startedAt = null
+  }
+
+  async function moveFileToAbandoned(filePath, fileName) {
+    if (!persistenceEnabled || !fs.existsSync(filePath)) return
+    const safeName = normalizeIdentifierPart(path.basename(fileName, ".json")) || "state"
+    const target = path.join(statePaths.abandoned, `${safeName}.${Date.now()}.json`)
+    try {
+      await fs.promises.rename(filePath, target)
+    } catch (error) {
+      log("WARN", "persistence", "Failed to move file to abandoned", { file: filePath, error: error?.message })
+    }
+  }
+
+  async function rmQuiet(filePath) {
+    if (!filePath) return
+    try {
+      await fs.promises.rm(filePath, { force: true })
+    } catch {
+      // best effort cleanup
+    }
   }
 
   async function sleep(ms, abortSignal) {
@@ -702,4 +1135,17 @@ export function createMemorySessionManager({ config, pluginRoot }) {
       abortSignal.addEventListener("abort", onAbort, { once: true })
     })
   }
+}
+
+function formatTimestamp(date) {
+  const pad = (value) => String(value).padStart(2, "0")
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("")
 }

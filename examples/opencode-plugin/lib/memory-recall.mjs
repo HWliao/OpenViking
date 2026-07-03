@@ -44,12 +44,13 @@ export function createMemoryRecall({ config, sessionManager }) {
   async function performRecallSearch(query, sessionId) {
     try {
       const body = { query: query.slice(0, 4000), limit: 20 }
-      const response = await makeRequest(sessionManager.getRequestConfig(sessionId), {
+      const requestConfig = sessionManager.getRequestConfig(sessionId)
+      const response = await makeRequest(requestConfig, {
         method: "POST",
         endpoint: "/api/v1/search/find",
         body,
         timeoutMs: AUTO_RECALL_TIMEOUT_MS,
-        actorPeerId: effectivePeerId(config),
+        actorPeerId: effectivePeerId(requestConfig),
       })
       const result = unwrapResponse(response)
       return result?.memories ?? result?.results ?? []

@@ -2,14 +2,16 @@ import fs from "fs"
 import path from "path"
 import { homedir } from "os"
 
+const MAX_PEER_ID_LENGTH = 128
+const MAX_OV_SESSION_ID_LENGTH = 512
+
 export const DEFAULT_CONFIG = {
   endpoint: "http://localhost:1933",
   apiKey: "",
   account: "",
   user: "",
-  agentId: "",
-  agentIdMode: "fixed",
   peerId: "",
+  peerIdMode: "auto",
   enabled: true,
   timeoutMs: 30000,
   runtime: {
@@ -37,7 +39,7 @@ function cloneDefaultConfig() {
 
 function mergeConfig(fileConfig = {}) {
   const config = cloneDefaultConfig()
-  for (const key of ["endpoint", "apiKey", "account", "user", "agentId", "agentIdMode", "peerId", "enabled", "timeoutMs"]) {
+  for (const key of ["endpoint", "apiKey", "account", "user", "peerId", "peerIdMode", "enabled", "timeoutMs"]) {
     if (fileConfig[key] !== undefined) config[key] = fileConfig[key]
   }
   config.runtime = {
@@ -56,17 +58,14 @@ function mergeConfig(fileConfig = {}) {
   if (process.env.OPENVIKING_USER) {
     config.user = process.env.OPENVIKING_USER
   }
-  if (process.env.OPENVIKING_AGENT_ID) {
-    config.agentId = process.env.OPENVIKING_AGENT_ID
-  }
   if (process.env.OPENVIKING_PEER_ID) {
     config.peerId = process.env.OPENVIKING_PEER_ID
   }
-  if (process.env.OPENVIKING_AGENT_ID_MODE) {
-    config.agentIdMode = process.env.OPENVIKING_AGENT_ID_MODE
+  if (process.env.OPENVIKING_PEER_ID_MODE) {
+    config.peerIdMode = process.env.OPENVIKING_PEER_ID_MODE
   }
 
-  config.agentIdMode = normalizeAgentIdMode(config.agentIdMode)
+  config.peerIdMode = normalizePeerIdMode(config.peerIdMode)
   config.timeoutMs = normalizeNumber(config.timeoutMs, DEFAULT_CONFIG.timeoutMs, 1000, 300000)
   config.repoContext.cacheTtlMs = normalizeNumber(
     config.repoContext.cacheTtlMs,
@@ -78,8 +77,11 @@ function mergeConfig(fileConfig = {}) {
   return config
 }
 
-function normalizeAgentIdMode(value) {
-  return value === "auto" || value === "fixed" ? value : DEFAULT_CONFIG.agentIdMode
+function normalizePeerIdMode(value) {
+  const mode = String(value ?? DEFAULT_CONFIG.peerIdMode).trim()
+  if (mode === "auto" || mode === "fixed") return mode
+  console.warn(`Invalid OpenViking peerIdMode "${value}"; falling back to "auto".`)
+  return DEFAULT_CONFIG.peerIdMode
 }
 
 function normalizeNumber(value, fallback, min, max) {
@@ -134,6 +136,42 @@ function expandHome(value) {
 export function initLogger(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true })
   logFilePath = path.join(dataDir, "openviking-memory.log")
+  rotateExistingLog(logFilePath)
+}
+
+function rotateExistingLog(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile() || stat.size === 0) return
+    fs.renameSync(filePath, nextLogBackupPath(filePath))
+  } catch (error) {
+    console.error("Failed to rotate OpenViking plugin log:", error)
+  }
+}
+
+function nextLogBackupPath(filePath) {
+  const parsed = path.parse(filePath)
+  const timestamp = formatLogTimestamp(new Date())
+  for (let index = 0; index < 100; index += 1) {
+    const suffix = index === 0 ? "" : `-${index}`
+    const candidate = path.join(parsed.dir, `${parsed.name}.${timestamp}${suffix}${parsed.ext}`)
+    if (!fs.existsSync(candidate)) return candidate
+  }
+  return path.join(parsed.dir, `${parsed.name}.${timestamp}-${process.pid}${parsed.ext}`)
+}
+
+function formatLogTimestamp(date) {
+  const pad = (value) => String(value).padStart(2, "0")
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("")
 }
 
 export function safeStringify(value) {
@@ -192,13 +230,58 @@ export function normalizeEndpoint(endpoint) {
   return endpoint.replace(/\/+$/, "")
 }
 
-export function withAgentId(config, agentId) {
-  if (!agentId) return config
-  return { ...config, agentId }
+export function normalizeIdentifierPart(value) {
+  return String(value ?? "")
+    .replace(/[^A-Za-z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+}
+
+export function isValidPeerId(value) {
+  const peerId = String(value ?? "").trim()
+  return peerId.length > 0 && peerId.length <= MAX_PEER_ID_LENGTH && /^[A-Za-z0-9_-]+$/.test(peerId)
+}
+
+export function resolveFixedPeerId(config = {}) {
+  const peerId = String(config.peerId ?? "").trim()
+  return { peerId: isValidPeerId(peerId) ? peerId : null }
+}
+
+export function deriveAutoPeerId({ project, session, projectID } = {}) {
+  const safeProjectId = normalizeIdentifierPart(projectID)
+  if (safeProjectId.length < 8) {
+    return { peerId: null, safeProjectId, shortProjectId: null }
+  }
+
+  const slug = normalizeIdentifierPart(path.basename(String(project?.worktree || session?.directory || "")))
+  if (!slug) {
+    return { peerId: null, safeProjectId, shortProjectId: safeProjectId.slice(0, 12) }
+  }
+
+  const shortProjectId = safeProjectId.slice(0, 12)
+  const maxSlugLength = MAX_PEER_ID_LENGTH - shortProjectId.length - 1
+  const peerId = `${slug.slice(0, Math.max(1, maxSlugLength))}_${shortProjectId}`
+  return { peerId: isValidPeerId(peerId) ? peerId : null, safeProjectId, shortProjectId }
+}
+
+export function resolveSafeOpenCodeSessionId(openCodeSessionId, now = Date.now()) {
+  const safeSessionId = normalizeIdentifierPart(openCodeSessionId)
+  return safeSessionId || `unknown_session_${now}`
+}
+
+export function buildOpenVikingSessionId({ peerId, openCodeSessionId, now = Date.now() } = {}) {
+  const safeOpenCodeSessionId = resolveSafeOpenCodeSessionId(openCodeSessionId, now)
+  const safePeerId = isValidPeerId(peerId) ? String(peerId).trim() : null
+  const prefix = safePeerId ? `${safePeerId}_` : "opencode_"
+  const remaining = MAX_OV_SESSION_ID_LENGTH - prefix.length
+  return {
+    safeOpenCodeSessionId,
+    ovSessionId: `${prefix}${safeOpenCodeSessionId.slice(0, Math.max(0, remaining))}`,
+  }
 }
 
 export function effectivePeerId(config) {
-  return String(config.peerId || "").trim() || null
+  return resolveFixedPeerId(config).peerId
 }
 
 export async function makeRequest(config, options) {
@@ -312,8 +395,7 @@ function makeAuthHeaders(config, headers = {}, actorPeerId = "") {
   if (config.apiKey) result["X-API-Key"] = config.apiKey
   if (config.account) result["X-OpenViking-Account"] = config.account
   if (config.user) result["X-OpenViking-User"] = config.user
-  if (config.agentId) result["X-OpenViking-Agent"] = config.agentId
-  const peerId = String(actorPeerId || "").trim()
+  const peerId = isValidPeerId(actorPeerId) ? String(actorPeerId).trim() : ""
   if (peerId) result["X-OpenViking-Actor-Peer"] = peerId
   return result
 }

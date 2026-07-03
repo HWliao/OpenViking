@@ -23,8 +23,11 @@ function codeToolRequestOptions(kind, { uri, query, symbol, actorPeerId, abortSi
   }
 }
 
-export function createCodeTools({ config }) {
-  const actorPeerId = effectivePeerId(config)
+export function createCodeTools({ config, sessionManager }) {
+  function getRequestConfig(context) {
+    return sessionManager?.getRequestConfig(context?.sessionID) ?? config
+  }
+
   return {
     codesearch: tool({
       description:
@@ -46,11 +49,12 @@ export function createCodeTools({ config }) {
         const validationError = validateVikingUri(args.uri, "codesearch")
         if (validationError) return validationError
         try {
-          const response = await makeRequest(config, {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             ...codeToolRequestOptions("search", {
               uri: args.uri,
               query: args.query,
-              actorPeerId,
+              actorPeerId: effectivePeerId(requestConfig),
               abortSignal: context.abort,
             }),
           })
@@ -79,10 +83,11 @@ export function createCodeTools({ config }) {
         const validationError = validateVikingUri(args.uri, "codeoutline")
         if (validationError) return validationError
         try {
-          const response = await makeRequest(config, {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             ...codeToolRequestOptions("outline", {
               uri: args.uri,
-              actorPeerId,
+              actorPeerId: effectivePeerId(requestConfig),
               abortSignal: context.abort,
             }),
           })
@@ -115,11 +120,12 @@ export function createCodeTools({ config }) {
         const validationError = validateVikingUri(args.uri, "codeexpand")
         if (validationError) return validationError
         try {
-          const response = await makeRequest(config, {
+          const requestConfig = getRequestConfig(context)
+          const response = await makeRequest(requestConfig, {
             ...codeToolRequestOptions("expand", {
               uri: args.uri,
               symbol: args.symbol,
-              actorPeerId,
+              actorPeerId: effectivePeerId(requestConfig),
               abortSignal: context.abort,
             }),
           })
