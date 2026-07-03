@@ -173,12 +173,11 @@ function postProcessMemories(items, maxContentChars, preferAbstract) {
   return items.map((item) => {
     const abstract = (item.abstract ?? "").trim()
     const content = (item.content ?? "").trim()
-    let displayContent = ""
-    if (preferAbstract && abstract) displayContent = abstract
-    else if (content) displayContent = content
-    else if (abstract) displayContent = abstract
-    if (displayContent.length > maxContentChars) displayContent = `${displayContent.slice(0, maxContentChars)}...`
-    return { ...item, content: displayContent, abstract: abstract || undefined }
+    const displayContent = preferAbstract && abstract ? abstract : content || abstract
+    const clippedContent = displayContent.length > maxContentChars
+      ? `${displayContent.slice(0, maxContentChars)}...`
+      : displayContent
+    return { ...item, content: clippedContent, abstract: abstract || undefined }
   })
 }
 

@@ -15,24 +15,28 @@ function makeConfig() {
 }
 
 async function writeSessionState(root, state) {
-  const sessions = join(root, "openviking-sessions", "sessions")
-  await mkdir(sessions, { recursive: true })
-  await mkdir(join(root, "openviking-sessions", "projects"), { recursive: true })
-  await mkdir(join(root, "openviking-sessions", "finalizing"), { recursive: true })
-  await mkdir(join(root, "openviking-sessions", "abandoned"), { recursive: true })
+  const sessions = join(await ensureSessionStateDirs(root), "sessions")
   const file = join(sessions, `${state.safeOpenCodeSessionId}.json`)
   await writeFile(file, JSON.stringify(state, null, 2), "utf8")
   return file
 }
 
 async function writeFinalizingState(root, state) {
-  await mkdir(join(root, "openviking-sessions", "sessions"), { recursive: true })
-  await mkdir(join(root, "openviking-sessions", "projects"), { recursive: true })
-  await mkdir(join(root, "openviking-sessions", "finalizing"), { recursive: true })
-  await mkdir(join(root, "openviking-sessions", "abandoned"), { recursive: true })
-  const file = join(root, "openviking-sessions", "finalizing", `${state.safeOpenCodeSessionId}.999.1.json`)
+  const file = join(
+    await ensureSessionStateDirs(root),
+    "finalizing",
+    `${state.safeOpenCodeSessionId}.999.1.json`,
+  )
   await writeFile(file, JSON.stringify({ ...state, claimedAt: 1 }, null, 2), "utf8")
   return file
+}
+
+async function ensureSessionStateDirs(root) {
+  const stateRoot = join(root, "openviking-sessions")
+  for (const name of ["sessions", "projects", "finalizing", "abandoned"]) {
+    await mkdir(join(stateRoot, name), { recursive: true })
+  }
+  return stateRoot
 }
 
 function expiredState(overrides = {}) {

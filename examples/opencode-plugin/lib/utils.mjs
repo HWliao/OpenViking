@@ -285,63 +285,22 @@ export function effectivePeerId(config) {
 }
 
 export async function makeRequest(config, options) {
-  const url = `${normalizeEndpoint(config.endpoint)}${options.endpoint}`
-  const headers = makeAuthHeaders(
-    config,
-    { "Content-Type": "application/json", ...(options.headers ?? {}) },
-    options.actorPeerId,
-  )
-
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? config.timeoutMs)
-  let onAbort = null
-
-  if (options.abortSignal) {
-    if (options.abortSignal.aborted) controller.abort()
-    onAbort = () => controller.abort()
-    options.abortSignal.addEventListener("abort", onAbort, { once: true })
-  }
-
-  try {
-    const response = await fetch(url, {
-      method: options.method,
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      signal: controller.signal,
-    })
-
-    const text = await response.text()
-    const payload = text ? parseJsonOrText(text) : {}
-
-    if (!response.ok) {
-      const rawError = typeof payload === "object" ? payload.error ?? payload.message : payload
-      const errorMessage = typeof rawError === "string" ? rawError : JSON.stringify(rawError)
-      if (response.status === 401 || response.status === 403) {
-        throw new Error("Authentication failed. Please check apiKey/account/user in openviking-config.json or OPENVIKING_* environment variables.")
-      }
-      throw new Error(`Request failed (${response.status}): ${errorMessage}`)
-    }
-
-    return payload
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`Request timeout after ${options.timeoutMs ?? config.timeoutMs}ms`)
-    }
-    if (error?.message?.includes("fetch failed") || error?.code === "ECONNREFUSED") {
-      throw new Error(`OpenViking service unavailable at ${config.endpoint}. Start it with: openviking-server --config ~/.openviking/ov.conf`)
-    }
-    throw error
-  } finally {
-    clearTimeout(timeout)
-    if (options.abortSignal && onAbort) {
-      options.abortSignal.removeEventListener("abort", onAbort)
-    }
-  }
+  return requestWithBody(config, options, {
+    headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  })
 }
 
 export async function makeMultipartRequest(config, options) {
+  return requestWithBody(config, options, {
+    headers: options.headers ?? {},
+    body: options.body,
+  })
+}
+
+async function requestWithBody(config, options, { headers, body }) {
   const url = `${normalizeEndpoint(config.endpoint)}${options.endpoint}`
-  const headers = makeAuthHeaders(config, options.headers ?? {}, options.actorPeerId)
+  const requestHeaders = makeAuthHeaders(config, headers, options.actorPeerId)
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? config.timeoutMs)
@@ -356,8 +315,8 @@ export async function makeMultipartRequest(config, options) {
   try {
     const response = await fetch(url, {
       method: options.method,
-      headers,
-      body: options.body,
+      headers: requestHeaders,
+      body,
       signal: controller.signal,
     })
 

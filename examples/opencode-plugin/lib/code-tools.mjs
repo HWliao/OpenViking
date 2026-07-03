@@ -50,14 +50,15 @@ export function createCodeTools({ config, sessionManager }) {
         if (validationError) return validationError
         try {
           const requestConfig = getRequestConfig(context)
-          const response = await makeRequest(requestConfig, {
-            ...codeToolRequestOptions("search", {
+          const response = await makeRequest(
+            requestConfig,
+            codeToolRequestOptions("search", {
               uri: args.uri,
               query: args.query,
               actorPeerId: effectivePeerId(requestConfig),
               abortSignal: context.abort,
             }),
-          })
+          )
           return unwrapResponse(response)
         } catch (error) {
           log("ERROR", "codesearch", "Search failed", { error: error?.message, args })
@@ -84,13 +85,14 @@ export function createCodeTools({ config, sessionManager }) {
         if (validationError) return validationError
         try {
           const requestConfig = getRequestConfig(context)
-          const response = await makeRequest(requestConfig, {
-            ...codeToolRequestOptions("outline", {
+          const response = await makeRequest(
+            requestConfig,
+            codeToolRequestOptions("outline", {
               uri: args.uri,
               actorPeerId: effectivePeerId(requestConfig),
               abortSignal: context.abort,
             }),
-          })
+          )
           return unwrapResponse(response)
         } catch (error) {
           log("ERROR", "codeoutline", "Outline failed", { error: error?.message, uri: args.uri })
@@ -121,14 +123,15 @@ export function createCodeTools({ config, sessionManager }) {
         if (validationError) return validationError
         try {
           const requestConfig = getRequestConfig(context)
-          const response = await makeRequest(requestConfig, {
-            ...codeToolRequestOptions("expand", {
+          const response = await makeRequest(
+            requestConfig,
+            codeToolRequestOptions("expand", {
               uri: args.uri,
               symbol: args.symbol,
               actorPeerId: effectivePeerId(requestConfig),
               abortSignal: context.abort,
             }),
-          })
+          )
           return unwrapResponse(response)
         } catch (error) {
           log("ERROR", "codeexpand", "Expand failed", { error: error?.message, args })

@@ -20,21 +20,22 @@ function makeConfig() {
 function installFetchMock(calls) {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options = {}) => {
-    calls.push({ url: String(url), options })
-    if (String(url).includes("/api/v1/tasks")) {
+    const urlString = String(url)
+    calls.push({ url: urlString, options })
+    if (urlString.includes("/api/v1/tasks")) {
       return jsonResponse({ status: "ok", result: [] })
     }
-    if (options.method === "GET" && String(url).includes("/api/v1/sessions/")) {
-      return jsonResponse({ status: "ok", result: { session_id: decodeURIComponent(String(url).split("/api/v1/sessions/")[1] ?? "") } })
+    if (options.method === "GET" && urlString.includes("/api/v1/sessions/")) {
+      return jsonResponse({ status: "ok", result: { session_id: decodeURIComponent(urlString.split("/api/v1/sessions/")[1] ?? "") } })
     }
-    if (options.method === "POST" && String(url).endsWith("/api/v1/sessions")) {
+    if (options.method === "POST" && urlString.endsWith("/api/v1/sessions")) {
       const body = JSON.parse(String(options.body || "{}"))
       return jsonResponse({ status: "ok", result: { session_id: body.session_id ?? "server-generated" } })
     }
-    if (options.method === "POST" && String(url).includes("/messages")) {
+    if (options.method === "POST" && urlString.includes("/messages")) {
       return jsonResponse({ status: "ok", result: { added: 1 } })
     }
-    if (options.method === "POST" && String(url).includes("/commit")) {
+    if (options.method === "POST" && urlString.includes("/commit")) {
       return jsonResponse({ status: "ok", result: {} })
     }
     return jsonResponse({ status: "ok", result: {} })

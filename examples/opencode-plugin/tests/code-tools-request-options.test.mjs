@@ -7,9 +7,10 @@ import { dirname, join } from "node:path"
 const testDir = dirname(fileURLToPath(import.meta.url))
 const codeToolsPath = join(testDir, "../lib/code-tools.mjs")
 const memoryRecallPath = join(testDir, "../lib/memory-recall.mjs")
+const codeToolsSource = readFile(codeToolsPath, "utf8")
 
 test("code tools propagate actorPeerId to every code request", async () => {
-  const source = await readFile(codeToolsPath, "utf8")
+  const source = await codeToolsSource
 
   assert.match(source, /import \{ effectivePeerId,/)
   assert.match(source, /function getRequestConfig\(context\)/)
@@ -17,7 +18,7 @@ test("code tools propagate actorPeerId to every code request", async () => {
 })
 
 test("code tool descriptions restrict use to confirmed viking code repositories", async () => {
-  const source = await readFile(codeToolsPath, "utf8")
+  const source = await codeToolsSource
 
   assert.match(source, /confirmed viking:\/\/ code repository or source subtree/)
   assert.match(source, /evidence that the uri contains supported source files/)

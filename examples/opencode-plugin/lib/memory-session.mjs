@@ -161,14 +161,29 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       messageRoles: new Map(state.messageRoles ?? []),
       pendingMessages: new Map(state.pendingMessages ?? []),
       sendingMessages: new Set(),
-      commit: {
-        lastCommitTime: state.commit?.lastCommitTime ?? state.lastCommitTime ?? null,
-        inFlight: Boolean(state.commit?.inFlight ?? state.commitInFlight),
-        taskId: state.commit?.taskId ?? state.commitTaskId ?? null,
-        startedAt: state.commit?.startedAt ?? state.commitStartedAt ?? null,
-        pendingCleanup: Boolean(state.commit?.pendingCleanup ?? state.pendingCleanup),
-      },
+      commit: deserializeCommitState(state),
     }
+  }
+
+  function createCommitState(overrides = {}) {
+    return {
+      lastCommitTime: null,
+      inFlight: false,
+      taskId: null,
+      startedAt: null,
+      pendingCleanup: false,
+      ...overrides,
+    }
+  }
+
+  function deserializeCommitState(state) {
+    return createCommitState({
+      lastCommitTime: state.commit?.lastCommitTime ?? state.lastCommitTime ?? null,
+      inFlight: Boolean(state.commit?.inFlight ?? state.commitInFlight),
+      taskId: state.commit?.taskId ?? state.commitTaskId ?? null,
+      startedAt: state.commit?.startedAt ?? state.commitStartedAt ?? null,
+      pendingCleanup: Boolean(state.commit?.pendingCleanup ?? state.pendingCleanup),
+    })
   }
 
   async function saveSessionState(mapping, { touch = true } = {}) {
@@ -284,11 +299,13 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       projectID: peerContext.projectID,
       safeProjectId: peerContext.safeProjectId,
     })
-    mapping.safeOpenCodeSessionId = sessionIds.safeOpenCodeSessionId
-    mapping.ovSessionId = ovSessionId
-    mapping.peerId = peerContext.peerId
-    mapping.projectID = peerContext.projectID
-    mapping.safeProjectId = peerContext.safeProjectId
+    Object.assign(mapping, {
+      safeOpenCodeSessionId: sessionIds.safeOpenCodeSessionId,
+      ovSessionId,
+      peerId: peerContext.peerId,
+      projectID: peerContext.projectID,
+      safeProjectId: peerContext.safeProjectId,
+    })
     sessionMap.set(sessionId, mapping)
 
     const bufferedMessages = sessionMessageBuffer.get(sessionId)
@@ -555,7 +572,6 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     const sessionId = part.sessionID
     const messageId = part.messageID
     if (!sessionId || !messageId || part.type !== "text" || !part.text?.trim()) return
-
 
     const mapping = sessionMap.get(sessionId)
     if (!mapping) {
@@ -1033,13 +1049,7 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
       messageRoles: new Map(),
       pendingMessages: new Map(),
       sendingMessages: new Set(),
-      commit: {
-        lastCommitTime: null,
-        inFlight: false,
-        taskId: null,
-        startedAt: null,
-        pendingCleanup: false,
-      },
+      commit: createCommitState(),
     }
   }
 
