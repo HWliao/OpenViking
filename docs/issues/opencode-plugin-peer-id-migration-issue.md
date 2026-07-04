@@ -1,6 +1,6 @@
 # OpenCode 插件 peerId 运行态改造与 session state 拆分
 
-状态：未开始
+状态：已修复
 
 ## 背景
 

@@ -373,6 +373,65 @@ test("explicit OpenViking session commit does not create local OpenCode mapping"
   }
 })
 
+test("concurrent lifecycle and manual commits share one server commit request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openviking-session-state-"))
+  const calls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, options = {}) => {
+    const urlString = String(url)
+    calls.push({ url: urlString, options })
+    if (options.method === "GET" && urlString.includes("/api/v1/sessions/")) {
+      return jsonResponse({ status: "ok", result: { session_id: decodeURIComponent(urlString.split("/api/v1/sessions/")[1] ?? "") } })
+    }
+    if (options.method === "POST" && urlString.endsWith("/api/v1/sessions")) {
+      const body = JSON.parse(String(options.body || "{}"))
+      return jsonResponse({ status: "ok", result: { session_id: body.session_id ?? "server-generated" } })
+    }
+    if (options.method === "POST" && urlString.includes("/messages")) {
+      return jsonResponse({ status: "ok", result: { added: 1 } })
+    }
+    if (options.method === "POST" && urlString.includes("/commit")) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return jsonResponse({ status: "ok", result: { task_id: "task-1" } })
+    }
+    if (options.method === "GET" && urlString.includes("/api/v1/tasks/task-1")) {
+      return jsonResponse({ status: "ok", result: { status: "completed", result: {} } })
+    }
+    return jsonResponse({ status: "ok", result: [] })
+  }
+  try {
+    const directory = join(root, "Repo")
+    const client = makeOpenCodeClient({
+      session: { id: "ses:/race", projectID: "project:abcdef123456", directory },
+      project: { id: "project:abcdef123456", worktree: directory },
+    })
+    const manager = createMemorySessionManager({ config: makeConfig(), pluginRoot: root, client })
+    await manager.init()
+    await manager.handleEvent(sessionCreatedEvent({ id: "ses:/race", directory }))
+    await manager.handleEvent({
+      type: "message.updated",
+      properties: { info: { id: "msg-1", sessionID: "ses:/race", role: "user" } },
+    })
+    await manager.handleEvent({
+      type: "message.part.updated",
+      properties: { part: { sessionID: "ses:/race", messageID: "msg-1", type: "text", text: "hello" } },
+    })
+    await manager.flushAll()
+
+    const ovSessionId = manager.getMappedSessionId("ses:/race")
+    await Promise.all([
+      manager.flushSession("ses:/race", { commit: true, reason: "test-boundary" }),
+      manager.commitSession(ovSessionId, "ses:/race"),
+    ])
+
+    const commitPosts = calls.filter((call) => call.options.method === "POST" && call.url.includes("/commit")).length
+    assert.equal(commitPosts, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("session file persists routing, staged messages, captured ids, and commit hints", async () => {
   const root = await mkdtemp(join(tmpdir(), "openviking-session-state-"))
   const calls = []

@@ -1,5 +1,7 @@
 # Windows Server Logging And Task Scripts
 
+状态：已修复
+
 ## Problem
 
 The packaged Windows startup flow wrote large amounts of server output into `openviking-server-wrapper.log`. The wrapper log contained repeated Python logging rollover failures such as `PermissionError: [WinError 32]` while renaming `openviking.log` to a dated archive. The scheduled task also used a VBS launcher directly and was not structured for a packaged install directory.

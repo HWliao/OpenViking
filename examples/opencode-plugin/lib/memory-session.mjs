@@ -26,6 +26,7 @@ const STALE_FINALIZING_MS = 10 * 60 * 1000
 export function createMemorySessionManager({ config, pluginRoot, client }) {
   const sessionMap = new Map()
   const sessionMessageBuffer = new Map()
+  const commitRequests = new Map()
   const commitWatchers = new Map()
   const sessionSaveTimers = new Map()
   const oldSessionMapPath = path.join(pluginRoot, "openviking-session-map.json")
@@ -718,14 +719,7 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
     }
 
     try {
-      const response = await makeRequest(config, {
-        method: "POST",
-        endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/commit`,
-        timeoutMs: 10000,
-        abortSignal,
-        actorPeerId: mapping.peerId,
-      })
-      const result = unwrapResponse(response)
+      const result = await postCommitRequest(mapping.ovSessionId, mapping.peerId, abortSignal)
       const taskId = result?.task_id
 
       if (!taskId) {
@@ -757,6 +751,28 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
         error: error?.message,
       })
       return null
+    }
+  }
+
+  async function postCommitRequest(sessionId, actorPeerId, abortSignal) {
+    const existing = commitRequests.get(sessionId)
+    if (existing) return existing
+
+    const request = makeRequest(config, {
+      method: "POST",
+      endpoint: `/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`,
+      timeoutMs: 10000,
+      abortSignal,
+      actorPeerId,
+    }).then((response) => unwrapResponse(response))
+
+    commitRequests.set(sessionId, request)
+    try {
+      return await request
+    } finally {
+      if (commitRequests.get(sessionId) === request) {
+        commitRequests.delete(sessionId)
+      }
     }
   }
 
@@ -905,7 +921,11 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
 
   async function commitSession(sessionId, opencodeSessionId, abortSignal) {
     try {
-      if (!opencodeSessionId) return await commitExplicitOpenVikingSession(sessionId, abortSignal)
+      if (!opencodeSessionId) {
+        const mapped = findMappingByOpenVikingSessionId(sessionId)
+        if (mapped) return await commitSession(sessionId, mapped.openCodeSessionId, abortSignal)
+        return await commitExplicitOpenVikingSession(sessionId, abortSignal)
+      }
 
       const mapped = opencodeSessionId ? sessionMap.get(opencodeSessionId) : undefined
       let mapping = mapped
@@ -938,20 +958,20 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
   }
 
   async function commitExplicitOpenVikingSession(sessionId, abortSignal) {
-    const response = await makeRequest(config, {
-      method: "POST",
-      endpoint: `/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`,
-      timeoutMs: 10000,
-      abortSignal,
-      actorPeerId: effectivePeerId(config),
-    })
-    const result = unwrapResponse(response)
+    const result = await postCommitRequest(sessionId, effectivePeerId(config), abortSignal)
     const taskId = result?.task_id
     if (!taskId) return { status: "completed", result }
 
     const task = await waitForExplicitCommitCompletion(taskId, abortSignal)
     if (!task) return { status: "accepted", task_id: taskId }
     return { status: task.status, task }
+  }
+
+  function findMappingByOpenVikingSessionId(sessionId) {
+    for (const mapping of sessionMap.values()) {
+      if (mapping.ovSessionId === sessionId) return mapping
+    }
+    return null
   }
 
   async function waitForExplicitCommitCompletion(taskId, abortSignal, timeoutMs = COMMIT_WAIT_TIMEOUT_MS) {
@@ -1029,14 +1049,12 @@ export function createMemorySessionManager({ config, pluginRoot, client }) {
   }
 
   async function triggerFinalizationCommit(mapping) {
+    if (mapping.commit.inFlight) {
+      return { transportFailure: false }
+    }
+
     try {
-      const response = await makeRequest(config, {
-        method: "POST",
-        endpoint: `/api/v1/sessions/${encodeURIComponent(mapping.ovSessionId)}/commit`,
-        timeoutMs: 10000,
-        actorPeerId: mapping.peerId,
-      })
-      unwrapResponse(response)
+      await postCommitRequest(mapping.ovSessionId, mapping.peerId)
       return { transportFailure: false }
     } catch (error) {
       if (isTransportFailure(error)) {

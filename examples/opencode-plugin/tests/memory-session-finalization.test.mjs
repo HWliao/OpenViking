@@ -138,6 +138,37 @@ test("commit server response during finalization deletes local session state", a
   }
 })
 
+test("finalization does not post a second commit when commit is already in flight", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openviking-finalization-"))
+  const file = await writeSessionState(root, expiredState({
+    capturedMessages: ["msg-1"],
+    commit: {
+      lastCommitTime: null,
+      inFlight: true,
+      taskId: "task-1",
+      startedAt: Date.now(),
+      pendingCleanup: true,
+    },
+  }))
+  let commitPosts = 0
+  const restoreFetch = installFetchMock(async (url, options = {}) => {
+    if (options.method === "POST" && String(url).includes("/commit")) {
+      commitPosts += 1
+    }
+    return jsonResponse({ status: "ok", result: {} })
+  })
+  try {
+    const manager = createMemorySessionManager({ config: makeConfig(), pluginRoot: root })
+    await manager.init()
+
+    assert.equal(commitPosts, 0)
+    assert.equal(existsSync(file), false)
+  } finally {
+    restoreFetch()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("stale finalizing state is restored to active sessions on startup", async () => {
   const root = await mkdtemp(join(tmpdir(), "openviking-finalization-"))
   await writeFinalizingState(root, expiredState({ expiresAt: Date.now() + 60_000 }))
